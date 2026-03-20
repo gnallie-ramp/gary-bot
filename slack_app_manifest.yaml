@@ -1,0 +1,112 @@
+display_information:
+  name: Gary Bot
+  description: AI Sales Intelligence Co-Pilot for Growth AMs
+  background_color: "#2c2d30"
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Gary Bot
+    always_online: true
+  slash_commands:
+    - command: /gary-lookup
+      description: Look up an account
+      usage_hint: "[account name]"
+      should_escape: false
+    - command: /gary-opps
+      description: Open expansion opp summary
+      should_escape: false
+    - command: /gary-brief
+      description: Pre-call expansion brief
+      usage_hint: "[account name]"
+      should_escape: false
+    - command: /pipeline-cleanup
+      description: Urgency-ranked pipeline review
+      should_escape: false
+    - command: /post-meeting
+      description: Post-meeting to-do check
+      should_escape: false
+    - command: /opp-pacing
+      description: Opp milestone tracking
+      should_escape: false
+    - command: /zero-to-one
+      description: Fresh product activations
+      should_escape: false
+    - command: /forecast
+      description: S3+ opps + coaching brief
+      should_escape: false
+    - command: /gary-status
+      description: Health check
+      should_escape: false
+    - command: /gary-help
+      description: Full help
+      should_escape: false
+    - command: /gary-test
+      description: Test all integrations
+      should_escape: false
+    - command: /morning-brief
+      description: Daily action summary
+      should_escape: false
+    - command: /priorities
+      description: Ranked priority actions
+      should_escape: false
+    - command: /quota-heartbeat
+      description: CP attainment + accelerator band
+      should_escape: false
+    - command: /spend-pacing
+      description: MTD vs last month trajectory
+      should_escape: false
+    - command: /post-close
+      description: Post-close activation tracking
+      should_escape: false
+    - command: /activity-report
+      description: SQLs + opps closed by product
+      should_escape: false
+    - command: /top-accounts
+      description: Top 50 by CP potential
+      should_escape: false
+    - command: /batch-outreach
+      description: Cluster accounts + draft campaigns
+      should_escape: false
+    - command: /nudge
+      description: What's new since last check
+      should_escape: false
+    - command: /bill-drafter
+      description: Bill pay email drafter sweep
+      should_escape: false
+    - command: /opp
+      description: Quick-create pre-filled SF opp
+      usage_hint: "[account] [product] [amount]"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - channels:read
+      - chat:write
+      - commands
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write
+      - mpim:history
+      - mpim:read
+      - users:read
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
