@@ -1846,6 +1846,21 @@ open_followup AS (
       AND o.opportunity_owner = 'Gregory Nallie'
       AND o.opportunity_stage_name != 'S0: Holding'
       AND o.expansion_subtype IN ('Card Expansion','Bill Pay Expansion','Travel Expansion','Treasury Expansion')
+),
+ro_last_email AS (
+    SELECT
+        sfdc_account_id AS account_id,
+        last_email_created_at::date AS last_email_date
+    FROM analytics.marts.dim_email_threads
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY sfdc_account_id ORDER BY last_email_created_at DESC) = 1
+),
+ro_last_call AS (
+    SELECT
+        gt.account_id,
+        MAX(gt.call_start)::date AS last_call_date
+    FROM analytics.marts.dim_sfdc_gong_transcripts gt
+    JOIN greg_cw_opps g ON g.account_id = gt.account_id
+    GROUP BY 1
 )
 SELECT
     g.account_name,
@@ -1859,12 +1874,16 @@ SELECT
     ROUND(COALESCE(sw.spend_d31_d60, 0))               AS spend_d31_d60,
     ROUND(COALESCE(sw.spend_d61_d90, 0))               AS spend_d61_d90,
     ROUND(COALESCE(sw.current_l30d, 0))                AS current_l30d,
-    CASE WHEN of2.account_id IS NOT NULL THEN 1 ELSE 0 END AS has_open_followup_opp
+    CASE WHEN of2.account_id IS NOT NULL THEN 1 ELSE 0 END AS has_open_followup_opp,
+    le.last_email_date,
+    lc.last_call_date
 FROM greg_cw_opps g
 LEFT JOIN spend_windows sw ON sw.opportunity_id = g.opportunity_id
 LEFT JOIN open_followup of2
        ON of2.account_id = g.account_id
       AND of2.expansion_subtype = g.expansion_subtype
+LEFT JOIN ro_last_email le ON le.account_id = g.account_id
+LEFT JOIN ro_last_call lc ON lc.account_id = g.account_id
 WHERE of2.account_id IS NULL
 ORDER BY g.cw_date DESC
 """
@@ -1994,6 +2013,21 @@ current_spend AS (
         ON tpv.business_id = g.business_id
         AND tpv.date_day >= CURRENT_DATE - 30
     GROUP BY g.opportunity_id, g.expansion_subtype
+),
+pc_last_email AS (
+    SELECT
+        sfdc_account_id AS account_id,
+        last_email_created_at::date AS last_email_date
+    FROM analytics.marts.dim_email_threads
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY sfdc_account_id ORDER BY last_email_created_at DESC) = 1
+),
+pc_last_call AS (
+    SELECT
+        gt.account_id,
+        MAX(gt.call_start)::date AS last_call_date
+    FROM analytics.marts.dim_sfdc_gong_transcripts gt
+    JOIN greg_cw_opps g ON g.account_id = gt.account_id
+    GROUP BY 1
 )
 SELECT
     g.account_name,
@@ -2016,9 +2050,13 @@ SELECT
         WHEN COALESCE(g.baseline_at_close, 0) > 0
         THEN 100.0 * COALESCE(c.spend_l30d, 0) / g.baseline_at_close
         ELSE 0
-    END) AS pct_of_baseline
+    END) AS pct_of_baseline,
+    le.last_email_date,
+    lc.last_call_date
 FROM greg_cw_opps g
 LEFT JOIN current_spend c ON c.opportunity_id = g.opportunity_id
+LEFT JOIN pc_last_email le ON le.account_id = g.account_id
+LEFT JOIN pc_last_call lc ON lc.account_id = g.account_id
 WHERE (
     -- D30 checkpoint: 25-35 days post-CW, spend < 80% of target
     (g.days_since_cw BETWEEN 25 AND 35
@@ -2113,8 +2151,39 @@ close_now AS (
     FROM open_opps oo
     LEFT JOIN baseline_per_opp b ON b.opportunity_id = oo.opportunity_id
     LEFT JOIN recent_per_opp r ON r.opportunity_id = oo.opportunity_id
+    -- Inline SPLM for close_now (can't reference accel_metrics — defined later)
+    LEFT JOIN analytics.agg.agg_payments__business_day p_now
+        ON p_now.business_id = oo.business_id AND p_now.date_day = CURRENT_DATE - 1
+    LEFT JOIN analytics.agg.agg_payments__business_day p_31
+        ON p_31.business_id = oo.business_id AND p_31.date_day = CURRENT_DATE - 31
+    LEFT JOIN analytics.agg.agg_payments__business_day p_62
+        ON p_62.business_id = oo.business_id AND p_62.date_day = CURRENT_DATE - 62
     WHERE COALESCE(r.recent_val, 0) > COALESCE(b.baseline_val, 0) * 1.1
-      AND COALESCE(r.recent_val, 0) - COALESCE(b.baseline_val, 0) > 3000
+      -- Product-specific delta minimums (match other signals)
+      AND COALESCE(r.recent_val, 0) - COALESCE(b.baseline_val, 0) >
+          CASE oo.expansion_subtype
+              WHEN 'Card Expansion'     THEN 5000
+              WHEN 'Bill Pay Expansion' THEN 5000
+              WHEN 'Travel Expansion'   THEN 2000
+              WHEN 'Treasury Expansion' THEN 50000
+              ELSE 5000
+          END
+      -- SPLM guard: current L7D must exceed best prior-month pattern (or truly no history)
+      AND (
+        (oo.expansion_subtype = 'Card Expansion'
+            AND (COALESCE(p_now.amount_card_payment_l7d, 0) >
+                 GREATEST(COALESCE(p_31.amount_card_payment_l7d, 0), COALESCE(p_62.amount_card_payment_l7d, 0)) * 1.5
+                 OR (COALESCE(p_31.amount_card_payment_l7d, 0) = 0
+                     AND COALESCE(p_62.amount_card_payment_l7d, 0) = 0
+                     AND COALESCE(p_now.amount_card_payment_l90d, 0) = 0)))
+        OR (oo.expansion_subtype = 'Bill Pay Expansion'
+            AND (COALESCE(p_now.amount_bill_payment_l7d, 0) >
+                 GREATEST(COALESCE(p_31.amount_bill_payment_l7d, 0), COALESCE(p_62.amount_bill_payment_l7d, 0)) * 1.5
+                 OR (COALESCE(p_31.amount_bill_payment_l7d, 0) = 0
+                     AND COALESCE(p_62.amount_bill_payment_l7d, 0) = 0
+                     AND COALESCE(p_now.amount_bill_payment_l30d, 0) = 0)))
+        OR oo.expansion_subtype IN ('Travel Expansion', 'Treasury Expansion')
+      )
 ),
 -- Spend since opp created, L30D, and L7D for zero-to-one signals
 zero_to_one_spend AS (
@@ -2169,10 +2238,14 @@ zero_to_one AS (
     JOIN milestones m ON m.account_id = oo.account_id
     LEFT JOIN zero_to_one_spend zs ON zs.opportunity_id = oo.opportunity_id
     WHERE (
-        (oo.expansion_subtype = 'Card Expansion'     AND m.card_activated_at     >= oo.created_date)
-        OR (oo.expansion_subtype = 'Bill Pay Expansion' AND m.billpay_activated_at >= oo.created_date)
-        OR (oo.expansion_subtype = 'Travel Expansion'   AND m.travel_activated_at  >= oo.created_date)
-        OR (oo.expansion_subtype = 'Treasury Expansion' AND m.treasury_activated_at >= oo.created_date)
+        (oo.expansion_subtype = 'Card Expansion'     AND m.card_activated_at     >= oo.created_date
+            AND m.card_activated_at >= CURRENT_DATE - 14)
+        OR (oo.expansion_subtype = 'Bill Pay Expansion' AND m.billpay_activated_at >= oo.created_date
+            AND m.billpay_activated_at >= CURRENT_DATE - 14)
+        OR (oo.expansion_subtype = 'Travel Expansion'   AND m.travel_activated_at  >= oo.created_date
+            AND m.travel_activated_at >= CURRENT_DATE - 14)
+        OR (oo.expansion_subtype = 'Treasury Expansion' AND m.treasury_activated_at >= oo.created_date
+            AND m.treasury_activated_at >= CURRENT_DATE - 14)
     )
     -- Exclude opps already surfaced as close_now
     AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM close_now)
@@ -2187,6 +2260,7 @@ current_snapshot AS (
         COALESCE(p.amount_card_payment_l7d, 0) AS card_l7d,
         COALESCE(p.amount_card_payment_l30d, 0) AS card_l30d,
         COALESCE(p.amount_card_payment_l90d, 0) AS card_l90d,
+        COALESCE(p.count_card_payment_l7d, 0) AS card_txn_count_l7d,
         COALESCE(p.amount_bill_payment_l3d, 0) AS bill_l3d,
         COALESCE(p.amount_bill_payment_l7d, 0) AS bill_l7d,
         COALESCE(p.amount_bill_payment_l30d, 0) AS bill_l30d,
@@ -2244,6 +2318,28 @@ splm AS (
     ) tt ON tt.business_id = ga.business_id
     WHERE p.date_day = CURRENT_DATE - 31
 ),
+-- Same period two months ago: L7D from 62 days ago (catches bimonthly/quarterly cycles)
+splm_60 AS (
+    SELECT
+        ga.account_id,
+        COALESCE(p.amount_card_payment_l7d, 0) AS card_l7d_splm60,
+        COALESCE(p.amount_bill_payment_l7d, 0) AS bill_l7d_splm60,
+        COALESCE(tt.travel_l7d_splm60, 0) AS travel_l7d_splm60,
+        COALESCE(tt.treasury_l7d_splm60, 0) AS treasury_l7d_splm60
+    FROM analytics.agg.agg_payments__business_day p
+    JOIN greg_accounts ga ON ga.business_id = p.business_id
+    LEFT JOIN (
+        SELECT
+            tpv.business_id,
+            SUM(CASE WHEN tpv.date_day BETWEEN CURRENT_DATE - 68 AND CURRENT_DATE - 62 THEN tpv.travel_tpv ELSE 0 END) AS travel_l7d_splm60,
+            AVG(CASE WHEN tpv.date_day BETWEEN CURRENT_DATE - 68 AND CURRENT_DATE - 62 THEN tpv.treasury_available_balance END) AS treasury_l7d_splm60
+        FROM analytics.metrics.fct_daily_business__multiproduct_tpv tpv
+        WHERE tpv.date_day BETWEEN CURRENT_DATE - 68 AND CURRENT_DATE - 62
+          AND tpv.business_id IN (SELECT business_id FROM greg_accounts)
+        GROUP BY tpv.business_id
+    ) tt ON tt.business_id = ga.business_id
+    WHERE p.date_day = CURRENT_DATE - 62
+),
 -- Per-product acceleration metrics
 accel_metrics AS (
     SELECT
@@ -2254,56 +2350,59 @@ accel_metrics AS (
         ROUND(cs.card_l90d / 3.0) AS card_baseline,
         cs.card_l30d AS card_l30d_current,
         cs.card_l7d,
-        COALESCE(sp.card_l7d_splm, 0) AS card_l7d_splm,
+        GREATEST(COALESCE(sp.card_l7d_splm, 0), COALESCE(sp60.card_l7d_splm60, 0)) AS card_l7d_splm,
+        cs.card_txn_count_l7d,
         -- Bill Pay metrics
         ROUND(cs.bill_l7d * 30.0 / 7) AS bill_l7d_pacing,
         ROUND(cs.bill_l90d / 3.0) AS bill_baseline,
         cs.bill_l30d AS bill_l30d_current,
         cs.bill_l7d,
-        COALESCE(sp.bill_l7d_splm, 0) AS bill_l7d_splm,
+        GREATEST(COALESCE(sp.bill_l7d_splm, 0), COALESCE(sp60.bill_l7d_splm60, 0)) AS bill_l7d_splm,
         -- Travel metrics
         ROUND(cs.travel_l7d * 30.0 / 7) AS travel_l7d_pacing,
         ROUND(cs.travel_l90d / 3.0) AS travel_baseline,
         cs.travel_l30d AS travel_l30d_current,
         cs.travel_l7d,
-        COALESCE(sp.travel_l7d_splm, 0) AS travel_l7d_splm,
+        GREATEST(COALESCE(sp.travel_l7d_splm, 0), COALESCE(sp60.travel_l7d_splm60, 0)) AS travel_l7d_splm,
         -- Treasury metrics
         ROUND(cs.treasury_l7d * 30.0 / 7) AS treasury_l7d_pacing,
         ROUND(cs.treasury_l90d / 3.0) AS treasury_baseline,
         cs.treasury_l30d AS treasury_l30d_current,
         cs.treasury_l7d,
-        COALESCE(sp.treasury_l7d_splm, 0) AS treasury_l7d_splm,
+        GREATEST(COALESCE(sp.treasury_l7d_splm, 0), COALESCE(sp60.treasury_l7d_splm60, 0)) AS treasury_l7d_splm,
         -- Leading indicators
         cs.next_3d_scheduled,
         cs.created_bill_today,
         cs.scheduled_bill_today,
-        -- Pick the product with biggest L7D anomaly (delta over baseline)
+        -- Pick the product with biggest NTR-weighted CP delta (not raw dollars)
+        -- Card 95bps, Bill Pay 15bps, Travel 350bps, Treasury 5bps
         CASE
             WHEN GREATEST(
-                cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0),
-                cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0),
-                cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0),
-                cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)
-            ) = cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0)
+                (cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0)) * 0.0095,
+                (cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0)) * 0.0015,
+                (cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0)) * 0.035,
+                (cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)) * 0.0005
+            ) = (cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0)) * 0.0095
                 THEN 'Card'
             WHEN GREATEST(
-                cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0),
-                cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0),
-                cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0),
-                cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)
-            ) = cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0)
-                THEN 'Bill Pay'
-            WHEN GREATEST(
-                cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0),
-                cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0),
-                cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0),
-                cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)
-            ) = cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0)
+                (cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0)) * 0.0095,
+                (cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0)) * 0.0015,
+                (cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0)) * 0.035,
+                (cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)) * 0.0005
+            ) = (cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0)) * 0.035
                 THEN 'Travel'
+            WHEN GREATEST(
+                (cs.card_l7d * 30.0/7 - COALESCE(cs.card_l90d / 3.0, 0)) * 0.0095,
+                (cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0)) * 0.0015,
+                (cs.travel_l7d * 30.0/7 - COALESCE(cs.travel_l90d / 3.0, 0)) * 0.035,
+                (cs.treasury_l7d * 30.0/7 - COALESCE(cs.treasury_l90d / 3.0, 0)) * 0.0005
+            ) = (cs.bill_l7d * 30.0/7 - COALESCE(cs.bill_l90d / 3.0, 0)) * 0.0015
+                THEN 'Bill Pay'
             ELSE 'Treasury'
         END AS best_product
     FROM current_snapshot cs
     LEFT JOIN splm sp ON sp.account_id = cs.account_id
+    LEFT JOIN splm_60 sp60 ON sp60.account_id = cs.account_id
 ),
 -- Accounts with NO open opp that show acceleration
 no_opp_accounts AS (
@@ -2361,8 +2460,9 @@ early_accel AS (
             AND noa.card_baseline >= 0
             AND noa.card_l7d_pacing > GREATEST(noa.card_baseline, 1) * 1.5
             AND noa.card_l7d_pacing - noa.card_baseline > 5000
-            AND (noa.card_l7d > noa.card_l7d_splm * 1.5 OR noa.card_l7d_splm = 0)
-            AND noa.card_l30d_current < noa.card_l7d_pacing * 0.7)
+            AND (noa.card_l7d > noa.card_l7d_splm * 1.5 OR (noa.card_l7d_splm = 0 AND noa.card_baseline = 0))
+            AND noa.card_l30d_current < noa.card_l7d_pacing * 0.7
+            AND noa.card_txn_count_l7d >= 3)
         OR
         -- Bill Pay early accel
         (noa.best_product = 'Bill Pay'
@@ -2370,7 +2470,7 @@ early_accel AS (
             AND noa.bill_baseline >= 0
             AND noa.bill_l7d_pacing > GREATEST(noa.bill_baseline, 1) * 1.5
             AND noa.bill_l7d_pacing - noa.bill_baseline > 5000
-            AND (noa.bill_l7d > noa.bill_l7d_splm * 1.5 OR noa.bill_l7d_splm = 0)
+            AND (noa.bill_l7d > noa.bill_l7d_splm * 1.5 OR (noa.bill_l7d_splm = 0 AND noa.bill_baseline = 0))
             AND noa.bill_l30d_current < noa.bill_l7d_pacing * 0.7)
         OR
         -- Travel early accel
@@ -2379,7 +2479,7 @@ early_accel AS (
             AND noa.travel_baseline >= 0
             AND noa.travel_l7d_pacing > GREATEST(noa.travel_baseline, 1) * 1.5
             AND noa.travel_l7d_pacing - noa.travel_baseline > 2000
-            AND (noa.travel_l7d > noa.travel_l7d_splm * 1.5 OR noa.travel_l7d_splm = 0)
+            AND (noa.travel_l7d > noa.travel_l7d_splm * 1.5 OR (noa.travel_l7d_splm = 0 AND noa.travel_baseline = 0))
             AND noa.travel_l30d_current < noa.travel_l7d_pacing * 0.7)
         OR
         -- Treasury early accel
@@ -2388,7 +2488,7 @@ early_accel AS (
             AND noa.treasury_baseline >= 0
             AND noa.treasury_l7d_pacing > GREATEST(noa.treasury_baseline, 1) * 1.5
             AND noa.treasury_l7d_pacing - noa.treasury_baseline > 50000
-            AND (noa.treasury_l7d > noa.treasury_l7d_splm * 1.5 OR noa.treasury_l7d_splm = 0)
+            AND (noa.treasury_l7d > noa.treasury_l7d_splm * 1.5 OR (noa.treasury_l7d_splm = 0 AND noa.treasury_baseline = 0))
             AND noa.treasury_l30d_current < noa.treasury_l7d_pacing * 0.7)
     )
 ),
@@ -2436,15 +2536,16 @@ sustained_accel AS (
             AND noa.card_baseline >= 0
             AND noa.card_l7d_pacing > GREATEST(noa.card_baseline, 1) * 1.5
             AND noa.card_l7d_pacing - noa.card_baseline > 5000
-            AND (noa.card_l7d > noa.card_l7d_splm * 1.5 OR noa.card_l7d_splm = 0)
-            AND noa.card_l30d_current >= noa.card_l7d_pacing * 0.7)
+            AND (noa.card_l7d > noa.card_l7d_splm * 1.5 OR (noa.card_l7d_splm = 0 AND noa.card_baseline = 0))
+            AND noa.card_l30d_current >= noa.card_l7d_pacing * 0.7
+            AND noa.card_txn_count_l7d >= 3)
         OR
         (noa.best_product = 'Bill Pay'
             AND noa.bill_l7d_pacing > 0
             AND noa.bill_baseline >= 0
             AND noa.bill_l7d_pacing > GREATEST(noa.bill_baseline, 1) * 1.5
             AND noa.bill_l7d_pacing - noa.bill_baseline > 5000
-            AND (noa.bill_l7d > noa.bill_l7d_splm * 1.5 OR noa.bill_l7d_splm = 0)
+            AND (noa.bill_l7d > noa.bill_l7d_splm * 1.5 OR (noa.bill_l7d_splm = 0 AND noa.bill_baseline = 0))
             AND noa.bill_l30d_current >= noa.bill_l7d_pacing * 0.7)
         OR
         (noa.best_product = 'Travel'
@@ -2452,7 +2553,7 @@ sustained_accel AS (
             AND noa.travel_baseline >= 0
             AND noa.travel_l7d_pacing > GREATEST(noa.travel_baseline, 1) * 1.5
             AND noa.travel_l7d_pacing - noa.travel_baseline > 2000
-            AND (noa.travel_l7d > noa.travel_l7d_splm * 1.5 OR noa.travel_l7d_splm = 0)
+            AND (noa.travel_l7d > noa.travel_l7d_splm * 1.5 OR (noa.travel_l7d_splm = 0 AND noa.travel_baseline = 0))
             AND noa.travel_l30d_current >= noa.travel_l7d_pacing * 0.7)
         OR
         (noa.best_product = 'Treasury'
@@ -2460,7 +2561,7 @@ sustained_accel AS (
             AND noa.treasury_baseline >= 0
             AND noa.treasury_l7d_pacing > GREATEST(noa.treasury_baseline, 1) * 1.5
             AND noa.treasury_l7d_pacing - noa.treasury_baseline > 50000
-            AND (noa.treasury_l7d > noa.treasury_l7d_splm * 1.5 OR noa.treasury_l7d_splm = 0)
+            AND (noa.treasury_l7d > noa.treasury_l7d_splm * 1.5 OR (noa.treasury_l7d_splm = 0 AND noa.treasury_baseline = 0))
             AND noa.treasury_l30d_current >= noa.treasury_l7d_pacing * 0.7)
     )
     -- Don't double-count accounts already in early_accel
@@ -2504,28 +2605,27 @@ close_window AS (
         END) AS spend_l7d
     FROM open_opps oo
     JOIN accel_metrics am ON am.account_id = oo.account_id
-    LEFT JOIN splm sp ON sp.account_id = oo.account_id
     WHERE oo.opportunity_id NOT IN (SELECT opportunity_id FROM close_now)
       AND (
         (oo.expansion_subtype = 'Card Expansion'
             AND am.card_l7d_pacing > am.card_l30d_current * 1.3
             AND am.card_l7d_pacing - am.card_l30d_current > 5000
-            AND (am.card_l7d > COALESCE(sp.card_l7d_splm, 0) * 1.5 OR COALESCE(sp.card_l7d_splm, 0) = 0))
+            AND (am.card_l7d > am.card_l7d_splm * 1.5 OR (am.card_l7d_splm = 0 AND am.card_baseline = 0)))
         OR
         (oo.expansion_subtype = 'Bill Pay Expansion'
             AND am.bill_l7d_pacing > am.bill_l30d_current * 1.3
             AND am.bill_l7d_pacing - am.bill_l30d_current > 5000
-            AND (am.bill_l7d > COALESCE(sp.bill_l7d_splm, 0) * 1.5 OR COALESCE(sp.bill_l7d_splm, 0) = 0))
+            AND (am.bill_l7d > am.bill_l7d_splm * 1.5 OR (am.bill_l7d_splm = 0 AND am.bill_baseline = 0)))
         OR
         (oo.expansion_subtype = 'Travel Expansion'
             AND am.travel_l7d_pacing > am.travel_l30d_current * 1.3
             AND am.travel_l7d_pacing - am.travel_l30d_current > 2000
-            AND (am.travel_l7d > COALESCE(sp.travel_l7d_splm, 0) * 1.5 OR COALESCE(sp.travel_l7d_splm, 0) = 0))
+            AND (am.travel_l7d > am.travel_l7d_splm * 1.5 OR (am.travel_l7d_splm = 0 AND am.travel_baseline = 0)))
         OR
         (oo.expansion_subtype = 'Treasury Expansion'
             AND am.treasury_l7d_pacing > am.treasury_l30d_current * 1.3
             AND am.treasury_l7d_pacing - am.treasury_l30d_current > 50000
-            AND (am.treasury_l7d > COALESCE(sp.treasury_l7d_splm, 0) * 1.5 OR COALESCE(sp.treasury_l7d_splm, 0) = 0))
+            AND (am.treasury_l7d > am.treasury_l7d_splm * 1.5 OR (am.treasury_l7d_splm = 0 AND am.treasury_baseline = 0)))
       )
 ),
 -- ── Leading indicator signal: large bills created/scheduled today ──
@@ -2547,8 +2647,12 @@ leading_indicator AS (
         ROUND(cs.bill_l7d) AS spend_l7d
     FROM current_snapshot cs
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.business_id = cs.business_id
+    LEFT JOIN accel_metrics am ON am.account_id = sa.account_id
     WHERE GREATEST(cs.created_bill_today, cs.scheduled_bill_today, cs.next_3d_scheduled) > 25000
       AND GREATEST(cs.created_bill_today, cs.scheduled_bill_today, cs.next_3d_scheduled) > cs.bill_l90d / 3.0
+      -- SPLM guard: bill amount must exceed prior month pattern (or no history)
+      AND (cs.bill_l7d > COALESCE(am.bill_l7d_splm, 0) * 1.5
+           OR (COALESCE(am.bill_l7d_splm, 0) = 0 AND COALESCE(cs.bill_l90d, 0) = 0))
     -- Exclude accounts already flagged in other signals
     AND NOT EXISTS (SELECT 1 FROM early_accel ea WHERE ea.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id)
@@ -2573,9 +2677,17 @@ card_leading AS (
         ROUND(cs.card_l7d) AS spend_l7d
     FROM current_snapshot cs
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.business_id = cs.business_id
+    LEFT JOIN accel_metrics am ON am.account_id = sa.account_id
     WHERE cs.card_l3d * 30.0 / 3 > 25000
       AND cs.card_l3d * 30.0 / 3 > cs.card_l90d / 3.0
       AND cs.card_l3d > cs.card_l7d * 0.6
+      -- Concentration guard: if L3D is nearly all of L30D, it's one lumpy payment, not acceleration
+      AND (cs.card_l30d = 0 OR cs.card_l3d < cs.card_l30d * 0.7)
+      -- SPLM guard: L3D must exceed prior month pattern (or truly no history)
+      AND (cs.card_l3d > COALESCE(am.card_l7d_splm, 0) * 0.6
+           OR (COALESCE(am.card_l7d_splm, 0) = 0 AND COALESCE(cs.card_l90d, 0) = 0))
+      -- Transaction count: must have 3+ card transactions in L7D (not one big payment)
+      AND cs.card_txn_count_l7d >= 3
     -- Exclude accounts already flagged
     AND NOT EXISTS (SELECT 1 FROM early_accel ea WHERE ea.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id)
@@ -2604,7 +2716,7 @@ first_bill_signal AS (
         ON bp.business_id = cs.business_id AND bp.date_day = CURRENT_DATE - 1
     WHERE oo.expansion_subtype = 'Bill Pay Expansion'
       AND COALESCE(bp.running_created_bill_count, 0) <= 3
-      AND COALESCE(bp.created_bill_amount, 0) > 0
+      AND COALESCE(bp.created_bill_amount, 0) > 1000  -- filter out test bills
       -- Exclude if already in close_now or zero_to_one
       AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM close_now WHERE opportunity_id IS NOT NULL)
       AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM zero_to_one WHERE opportunity_id IS NOT NULL)
@@ -2629,6 +2741,9 @@ treasury_spike AS (
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.business_id = am.business_id
     WHERE am.treasury_l7d > am.treasury_l30d_current * 2.0
       AND am.treasury_l7d - am.treasury_l30d_current > 100000
+      -- SPLM guard: treasury L7D must exceed prior month pattern (or no history)
+      AND (am.treasury_l7d > am.treasury_l7d_splm * 1.5
+           OR (am.treasury_l7d_splm = 0 AND am.treasury_baseline = 0))
       -- Exclude accounts already in other treasury signals
       AND NOT EXISTS (SELECT 1 FROM early_accel ea WHERE ea.account_id = sa.account_id AND ea.product = 'Treasury Expansion')
       AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id AND sac.product = 'Treasury Expansion')
@@ -2652,6 +2767,21 @@ combined AS (
     SELECT * FROM sustained_accel
     UNION ALL
     SELECT * FROM treasury_spike
+),
+last_email AS (
+    SELECT
+        sfdc_account_id AS account_id,
+        last_email_created_at::date AS last_email_date
+    FROM analytics.marts.dim_email_threads
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY sfdc_account_id ORDER BY last_email_created_at DESC) = 1
+),
+last_call AS (
+    SELECT
+        gt.account_id,
+        MAX(gt.call_start)::date AS last_call_date
+    FROM analytics.marts.dim_sfdc_gong_transcripts gt
+    JOIN greg_accounts ga ON ga.account_id = gt.account_id
+    GROUP BY 1
 ),
 ranked AS (
     SELECT
@@ -2680,11 +2810,15 @@ ranked AS (
     FROM combined
 )
 SELECT
-    signal_type, opportunity_name, account_name, product, opportunity_id, account_id,
-    l30d_spend_delta, activation_date, paced_amount, baseline_amount,
-    spend_since_opp, spend_l30d, spend_l7d, est_cp
-FROM ranked
-WHERE rn <= 30
+    r.signal_type, r.opportunity_name, r.account_name, r.product, r.opportunity_id, r.account_id,
+    r.l30d_spend_delta, r.activation_date, r.paced_amount, r.baseline_amount,
+    r.spend_since_opp, r.spend_l30d, r.spend_l7d, r.est_cp,
+    le.last_email_date,
+    lc.last_call_date
+FROM ranked r
+LEFT JOIN last_email le ON le.account_id = r.account_id
+LEFT JOIN last_call lc ON lc.account_id = r.account_id
+WHERE r.rn <= 30
 ORDER BY
     CASE signal_type
         WHEN 'early_accel'      THEN 1

@@ -31,8 +31,10 @@ LABEL_IDS = {
     "Claude Drafts/Procurement Trials": "Label_28",
     "Claude Drafts/Large Declines": "Label_29",
     "Claude Drafts/PCLIP Activation": "Label_30",
+    "Claude Drafts/Prospecting": "Label_1136196488463956037",
+    "Claude Drafts/Fundraise": "Label_5788174719529264583",
 }
-DEFAULT_LABEL_ID = "Label_26"  # Post Meeting
+DEFAULT_LABEL_ID = "Label_1136196488463956037"  # Prospecting
 
 
 def _load_access_token() -> str:

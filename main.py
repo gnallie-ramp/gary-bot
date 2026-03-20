@@ -356,8 +356,9 @@ def _run_catchup_jobs():
 
     Covers: priority_actions, catchup_report, morning_brief, zero_to_one,
     granola followup (with extended lookback), Gong post-meeting followup,
-    quota_insights, spend_pacing, opp_pacing, pipeline_cleanup, and
-    proactive_nudge.
+    quota_insights, spend_pacing, opp_pacing, pipeline_cleanup,
+    proactive_nudge, acceleration_daily, forecasting, pre_meeting_brief,
+    post_meeting, and post_close_monitor.
     """
     from datetime import datetime
     import pytz
@@ -463,6 +464,31 @@ def _run_catchup_jobs():
         if gap_hours >= 0.5 and is_workday and 5 <= hour <= 18:
             from jobs.acceleration_alert import run_acceleration_alert
             _safe_run("acceleration_alert", run_acceleration_alert, app.client)
+
+        # Acceleration daily summary (normally 5 AM PT = 8 AM ET)
+        if gap_hours >= 2.0 and is_workday and 5 <= hour <= 10:
+            from jobs.acceleration_alert import run_acceleration_alert as _accel
+            _safe_run("acceleration_daily", _accel, app.client, daily=True)
+
+        # Weekly forecasting (normally Monday 7 AM PT)
+        if gap_hours >= 2.0 and is_workday and now_pt.weekday() == 0 and 7 <= hour <= 12:
+            from jobs.forecasting import run_forecasting
+            _safe_run("forecasting", run_forecasting, app.client)
+
+        # Pre-meeting brief (normally every 30 min 7AM-6PM — run once to catch upcoming meetings)
+        if gap_hours >= 0.5 and is_workday and 7 <= hour <= 18:
+            from jobs.pre_meeting_brief import run_pre_meeting_brief
+            _safe_run("pre_meeting_brief", run_pre_meeting_brief, app.client)
+
+        # Post-meeting to-do (normally every 2h 8AM-6PM — catches yesterday's late calls)
+        if gap_hours >= 2.0 and is_workday and 8 <= hour <= 18:
+            from jobs.post_meeting import run_post_meeting
+            _safe_run("post_meeting", run_post_meeting, app.client, lookback_days=2)
+
+        # Post-close CP monitor (normally 10 AM PT)
+        if gap_hours >= 2.0 and is_workday and 10 <= hour <= 18:
+            from jobs.post_close_monitor import run_post_close_monitor
+            _safe_run("post_close_monitor", run_post_close_monitor, app.client)
 
         # If it's a workday and we missed daily jobs, run key ones
         if gap_hours >= 4.0 and 8 <= hour <= 18 and is_workday:

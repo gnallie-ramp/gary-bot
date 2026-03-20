@@ -20,7 +20,7 @@ from config import GREG_SLACK_ID
 
 logger = logging.getLogger(__name__)
 
-SF_BASE_URL = "https://rampfinancial.lightning.force.com"
+SF_BASE_URL = "https://rampfinancial.lightning.force.com/lightning"
 
 # Only surface these time-sensitive signal types in real-time DMs
 _URGENT_SIGNALS = {"early_accel", "close_window", "leading", "first_bill", "treasury_spike"}
@@ -28,9 +28,16 @@ _URGENT_SIGNALS = {"early_accel", "close_window", "leading", "first_bill", "trea
 # Persistent cache file for already-notified signals
 _SEEN_CACHE_PATH = Path.home() / ".gary_bot_seen_signals.json"
 
+# Confirmation cache: signals must appear in 2+ consecutive runs before DM
+_PENDING_CACHE_PATH = Path.home() / ".gary_bot_pending_signals.json"
+
 # In-memory cache of already-notified signals: {(signal_type, account_id): timestamp}
 # Reset daily at the morning summary run. Persisted to disk between restarts.
 _seen_signals: dict[tuple[str, str], float] = {}
+
+# Pending signals awaiting confirmation: {(signal_type, account_id): first_seen_timestamp}
+# If a signal appears again on the next run, it is confirmed and DM'd.
+_pending_signals: dict[tuple[str, str], float] = {}
 
 # Track last daily summary date to know when to reset
 _last_daily_date: str = ""
@@ -38,18 +45,26 @@ _last_daily_date: str = ""
 
 def _load_seen_cache():
     """Load seen-signals cache from disk."""
-    global _seen_signals, _last_daily_date
+    global _seen_signals, _pending_signals, _last_daily_date
     try:
         if _SEEN_CACHE_PATH.exists():
             data = json.loads(_SEEN_CACHE_PATH.read_text())
             _last_daily_date = data.get("last_daily_date", "")
-            # Convert list keys back to tuples
             for entry in data.get("signals", []):
                 key = (entry["signal_type"], entry["account_id"])
                 _seen_signals[key] = entry["timestamp"]
             logger.info("Loaded %d seen signals from cache (date: %s)", len(_seen_signals), _last_daily_date)
     except Exception as e:
         logger.warning("Failed to load seen-signals cache: %s", e)
+    try:
+        if _PENDING_CACHE_PATH.exists():
+            data = json.loads(_PENDING_CACHE_PATH.read_text())
+            for entry in data.get("pending", []):
+                key = (entry["signal_type"], entry["account_id"])
+                _pending_signals[key] = entry["timestamp"]
+            logger.info("Loaded %d pending signals from cache", len(_pending_signals))
+    except Exception as e:
+        logger.warning("Failed to load pending-signals cache: %s", e)
 
 
 def _save_seen_cache():
@@ -65,6 +80,20 @@ def _save_seen_cache():
         _SEEN_CACHE_PATH.write_text(json.dumps(data, indent=2))
     except Exception as e:
         logger.warning("Failed to save seen-signals cache: %s", e)
+
+
+def _save_pending_cache():
+    """Persist pending-signals cache to disk."""
+    try:
+        data = {
+            "pending": [
+                {"signal_type": k[0], "account_id": k[1], "timestamp": v}
+                for k, v in _pending_signals.items()
+            ],
+        }
+        _PENDING_CACHE_PATH.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        logger.warning("Failed to save pending-signals cache: %s", e)
 
 
 # Load cache on module import
@@ -193,9 +222,10 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
 
-        # Reset seen cache at the start of each day
+        # Reset seen + pending cache at the start of each day
         if today_str != _last_daily_date:
             _seen_signals = {}
+            _pending_signals = {}
             _last_daily_date = today_str
             _save_seen_cache()
 
@@ -226,26 +256,51 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
             urgent = urgent[~urgent["signal_type"].isin(muted_signals)]
             logger.info("Acceleration alert: muted signals filtered out: %s", muted_signals)
 
-        # Real-time mode: only send NEW signals not yet seen
-        new_rows = []
+        # Real-time mode: confirmation layer + dedup
+        # Signals must appear in 2+ consecutive runs before being DM'd.
+        # First appearance → pending. Second appearance → confirmed → DM.
+        now_ts = now.timestamp()
+        confirmed_rows = []
+        current_keys = set()
+
         for _, row in urgent.iterrows():
             key = (row.get("signal_type", ""), row.get("account_id", ""))
-            if key not in _seen_signals:
-                new_rows.append(row)
-                _seen_signals[key] = now.timestamp()
+            current_keys.add(key)
 
-        if new_rows:
+            if key in _seen_signals:
+                continue  # already notified today
+
+            if key in _pending_signals:
+                # Signal appeared before and is back — confirmed
+                confirmed_rows.append(row)
+                _seen_signals[key] = now_ts
+                _pending_signals.pop(key, None)
+            else:
+                # First appearance — add to pending, don't DM yet
+                _pending_signals[key] = now_ts
+
+        # Prune pending signals that disappeared (no longer in query results)
+        stale_pending = [k for k in _pending_signals if k not in current_keys]
+        for k in stale_pending:
+            _pending_signals.pop(k, None)
+
+        _save_pending_cache()
+        if confirmed_rows:
             _save_seen_cache()
 
-        if not new_rows and not force:
-            logger.info("Acceleration alert: no new signals (all seen)")
+        if not confirmed_rows and not force:
+            pending_count = len(_pending_signals)
+            if pending_count:
+                logger.info("Acceleration alert: %d signals pending confirmation", pending_count)
+            else:
+                logger.info("Acceleration alert: no new signals (all seen)")
             return
 
-        if not new_rows:
+        if not confirmed_rows:
             return
 
-        # Send individual DMs for each new signal
-        _send_realtime_alerts(client, new_rows, now)
+        # Send individual DMs for each confirmed signal
+        _send_realtime_alerts(client, confirmed_rows, now)
 
     except Exception as e:
         logger.error("Acceleration alert failed: %s", e)

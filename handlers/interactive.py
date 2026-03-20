@@ -13,6 +13,9 @@ import re
 import threading
 import time
 
+# Limit concurrent draft threads to prevent Snowflake connection overload
+_draft_semaphore = threading.Semaphore(3)
+
 from config import GREG_SLACK_ID, OWNER_NAME, OWNER_FIRST_NAME, BOOKING_LINK
 
 logger = logging.getLogger(__name__)
@@ -754,14 +757,15 @@ def register_interactive_handlers(app):
         )
 
         def _run():
-            try:
-                _draft_smart_email(account_id, account_name, opp_id, product, category, client)
-            except Exception as e:
-                logger.error("Outreach draft failed for %s: %s", account_name, e)
-                client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
-                    text=f"Failed to draft email for *{account_name}*: {e}",
-                )
+            with _draft_semaphore:
+                try:
+                    _draft_smart_email(account_id, account_name, opp_id, product, category, client)
+                except Exception as e:
+                    logger.error("Outreach draft failed for %s: %s", account_name, e)
+                    client.chat_postMessage(
+                        channel=GREG_SLACK_ID,
+                        text=f"Failed to draft email for *{account_name}*: {e}",
+                    )
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -797,14 +801,15 @@ def register_interactive_handlers(app):
         )
 
         def _run():
-            try:
-                _draft_smart_email(account_id, account_name, opp_id, product, "stale", client)
-            except Exception as e:
-                logger.error("Re-engage draft failed for %s: %s", account_name, e)
-                client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
-                    text=f"Failed to draft re-engage email for *{account_name}*: {e}",
-                )
+            with _draft_semaphore:
+                try:
+                    _draft_smart_email(account_id, account_name, opp_id, product, "stale", client)
+                except Exception as e:
+                    logger.error("Re-engage draft failed for %s: %s", account_name, e)
+                    client.chat_postMessage(
+                        channel=GREG_SLACK_ID,
+                        text=f"Failed to draft re-engage email for *{account_name}*: {e}",
+                    )
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -923,9 +928,26 @@ def register_interactive_handlers(app):
                     except Exception:
                         return 0
 
-                sf_base = "https://rampfinancial.lightning.force.com"
+                sf_base = "https://rampfinancial.lightning.force.com/lightning"
                 lines = [f"*{header}*\n"]
                 buttons = []
+
+                def _touch(r):
+                    """Compact last-call / last-email context."""
+                    parts = []
+                    for key, label in [("last_call_date", "Call"), ("last_email_date", "Email")]:
+                        val = r.get(key)
+                        if val is not None and str(val).strip() not in ("", "None", "NaT"):
+                            try:
+                                if hasattr(val, "strftime"):
+                                    parts.append(f"{label} {val.strftime('%-m/%-d')}")
+                                else:
+                                    from datetime import datetime as _dt
+                                    d = _dt.strptime(str(val)[:10], "%Y-%m-%d")
+                                    parts.append(f"{label} {d.strftime('%-m/%-d')}")
+                            except Exception:
+                                pass
+                    return f"\n   _Last: {' · '.join(parts)}_" if parts else ""
 
                 for _, row in filtered.iterrows():
                     acct_name = row.get("account_name", "Unknown")
@@ -941,36 +963,37 @@ def register_interactive_handlers(app):
                     delta = _si(row.get("l30d_spend_delta", 0))
                     cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
                     pct = int(((paced - base) / base) * 100) if base > 0 else 0
+                    touch = _touch(row)
 
                     if signal_type == "early_accel":
                         lines.append(
                             f"\u2022 {link} — {product} L7D pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%)"
-                            f"\n   L30D: ${l30d:,} · L7D raw: ${l7d:,}{cp_str}"
+                            f"\n   L30D: ${l30d:,} · L7D raw: ${l7d:,}{cp_str}{touch}"
                         )
                     elif signal_type == "close_window":
                         lines.append(
-                            f"\u2022 {link} — {product} L7D pacing ${paced:,}/mo · L30D baseline: ${l30d:,}{cp_str}"
+                            f"\u2022 {link} — {product} L7D pacing ${paced:,}/mo · L30D baseline: ${l30d:,}{cp_str}{touch}"
                         )
                     elif signal_type == "leading":
                         lines.append(
-                            f"\u2022 {link} — {product} ${paced:,} incoming vs ${base:,}/mo baseline{cp_str}"
+                            f"\u2022 {link} — {product} ${paced:,} incoming vs ${base:,}/mo baseline{cp_str}{touch}"
                         )
                     elif signal_type == "first_bill":
                         lines.append(
-                            f"\u2022 {link} — first bill ${paced:,}{cp_str}"
+                            f"\u2022 {link} — first bill ${paced:,}{cp_str}{touch}"
                         )
                     elif signal_type == "close_now":
                         lines.append(
-                            f"\u2022 {link} — {product} L30D +${abs(delta):,} above baseline{cp_str}"
+                            f"\u2022 {link} — {product} L30D +${abs(delta):,} above baseline{cp_str}{touch}"
                         )
                     elif signal_type == "zero_to_one":
                         spend_since = _si(row.get("spend_since_opp", 0))
                         lines.append(
-                            f"\u2022 {link} — {product} · ${spend_since:,} since opp · L30D ${l30d:,} · L7D ${l7d:,}{cp_str}"
+                            f"\u2022 {link} — {product} · ${spend_since:,} since opp · L30D ${l30d:,} · L7D ${l7d:,}{cp_str}{touch}"
                         )
                     elif signal_type == "sustained_accel":
                         lines.append(
-                            f"\u2022 {link} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}"
+                            f"\u2022 {link} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}{touch}"
                         )
 
                     # Build draft button
@@ -1171,18 +1194,13 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     from utils.account_resolver import fetch_contact_emails, is_hash_like
     from config import NTR_RATES
 
-    # ── 1. Fetch contacts — prioritize people Greg has met with ──
-    contacts = fetch_contact_emails(None, [account_id])
-    acct_contacts = contacts.get(account_id, [])
+    # ── 1. Fetch all context in parallel (contacts, gong, notes, emails) ──
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Try to find Gong participants for this account
-    gong_participants = set()
-    gong_context = ""
-    last_call_name = ""
-    last_call_date = ""
-    product_requests = ""
-    competitors = ""
-    try:
+    def _fetch_contacts():
+        return fetch_contact_emails(None, [account_id]).get(account_id, [])
+
+    def _fetch_gong():
         gong_query = f"""
         SELECT
             gt.call_name,
@@ -1211,33 +1229,71 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         ORDER BY gt.call_start DESC
         LIMIT 3
         """
-        gong_df = run_query(gong_query)
-        if not gong_df.empty:
-            parts = []
-            for _, row in gong_df.iterrows():
-                ext_emails = str(row.get("external_emails", "") or "")
-                for em in ext_emails.split(","):
-                    em = em.strip().lower()
-                    if em and "@" in em:
-                        gong_participants.add(em)
-                call_name = row.get("call_name", "")
-                call_date = str(row.get("call_date", ""))
-                summary = str(row.get("call_summary", "") or "")[:800]
-                if not last_call_name:
-                    last_call_name = call_name
-                    last_call_date = call_date
-                    product_requests = str(row.get("product_requests", "") or "")
-                    competitors = str(row.get("competitors", "") or "")
-                parts.append(f"--- {call_name} ({call_date}) ---\n{summary}")
-            gong_context = "\n\n".join(parts)
-    except Exception as e:
-        logger.debug("Gong context fetch failed for %s: %s", account_id, e)
+        return run_query(gong_query)
+
+    def _fetch_notes():
+        return run_query(ACCOUNT_NOTES_QUERY.format(account_ids=f"'{account_id}'"))
+
+    def _fetch_emails():
+        return run_query(ACCOUNT_EMAILS_FULL_QUERY.format(account_ids=f"'{account_id}'"))
+
+    acct_contacts = []
+    gong_df = None
+    notes_df = None
+    emails_df = None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_fetch_contacts): "contacts",
+            pool.submit(_fetch_gong): "gong",
+            pool.submit(_fetch_notes): "notes",
+            pool.submit(_fetch_emails): "emails",
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                result = future.result()
+                if key == "contacts":
+                    acct_contacts = result
+                elif key == "gong":
+                    gong_df = result
+                elif key == "notes":
+                    notes_df = result
+                elif key == "emails":
+                    emails_df = result
+            except Exception as e:
+                logger.debug("Context fetch %s failed for %s: %s", key, account_id, e)
+
+    # Parse Gong results
+    gong_participants = set()
+    gong_context = ""
+    last_call_name = ""
+    last_call_date = ""
+    product_requests = ""
+    competitors = ""
+    if gong_df is not None and not gong_df.empty:
+        parts = []
+        for _, row in gong_df.iterrows():
+            ext_emails = str(row.get("external_emails", "") or "")
+            for em in ext_emails.split(","):
+                em = em.strip().lower()
+                if em and "@" in em:
+                    gong_participants.add(em)
+            call_name = row.get("call_name", "")
+            call_date = str(row.get("call_date", ""))
+            summary = str(row.get("call_summary", "") or "")[:800]
+            if not last_call_name:
+                last_call_name = call_name
+                last_call_date = call_date
+                product_requests = str(row.get("product_requests", "") or "")
+                competitors = str(row.get("competitors", "") or "")
+            parts.append(f"--- {call_name} ({call_date}) ---\n{summary}")
+        gong_context = "\n\n".join(parts)
 
     # Select best contact: prefer someone Greg has met with (in Gong)
     contact_email = ""
     contact_name = ""
     contact_title = ""
-    # First pass: Gong participants
     for c in acct_contacts:
         email = (c.get("email") or "").lower()
         if email and email in gong_participants and not is_hash_like(c.get("name", "")):
@@ -1245,7 +1301,6 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
             contact_name = c.get("name", "")
             contact_title = c.get("title", "")
             break
-    # Second pass: any valid contact
     if not contact_email:
         for c in acct_contacts:
             if c.get("email") and not is_hash_like(c.get("name", "")):
@@ -1261,39 +1316,31 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         )
         return
 
-    # ── 2. Fetch SFDC notes ──
+    # Parse SFDC notes
     sfdc_notes = ""
-    try:
-        notes_df = run_query(ACCOUNT_NOTES_QUERY.format(account_ids=f"'{account_id}'"))
-        if not notes_df.empty:
-            row = notes_df.iloc[0]
-            parts = []
-            for field, label in [
-                ("am_notes", "AM Notes"), ("am_next_steps", "AM Next Steps"),
-                ("csm_notes", "CSM Notes"), ("csm_next_steps", "CSM Next Steps"),
-            ]:
-                val = row.get(field)
-                if val and str(val).strip() and str(val).strip().lower() != "none":
-                    parts.append(f"{label}: {val}")
-            sfdc_notes = "\n".join(parts)
-    except Exception:
-        pass
+    if notes_df is not None and not notes_df.empty:
+        row = notes_df.iloc[0]
+        parts = []
+        for field, label in [
+            ("am_notes", "AM Notes"), ("am_next_steps", "AM Next Steps"),
+            ("csm_notes", "CSM Notes"), ("csm_next_steps", "CSM Next Steps"),
+        ]:
+            val = row.get(field)
+            if val and str(val).strip() and str(val).strip().lower() != "none":
+                parts.append(f"{label}: {val}")
+        sfdc_notes = "\n".join(parts)
 
-    # ── 3. Fetch recent emails ──
+    # Parse recent emails
     email_comms = ""
-    try:
-        emails_df = run_query(ACCOUNT_EMAILS_FULL_QUERY.format(account_ids=f"'{account_id}'"))
-        if not emails_df.empty:
-            parts = []
-            for _, e in emails_df.head(3).iterrows():
-                direction = e.get("direction", "")
-                date = e.get("email_date", "")
-                subject = e.get("subject", "")
-                body = str(e.get("body_text", "") or "")[:800]
-                parts.append(f"--- {date} ({direction}) ---\nSubject: {subject}\n{body}")
-            email_comms = "\n\n".join(parts)
-    except Exception:
-        pass
+    if emails_df is not None and not emails_df.empty:
+        parts = []
+        for _, e in emails_df.head(3).iterrows():
+            direction = e.get("direction", "")
+            date = e.get("email_date", "")
+            subject = e.get("subject", "")
+            body = str(e.get("body_text", "") or "")[:800]
+            parts.append(f"--- {date} ({direction}) ---\nSubject: {subject}\n{body}")
+        email_comms = "\n\n".join(parts)
 
     # ── 4. Build the Claude prompt based on category ──
     first_name = contact_name.split()[0] if contact_name else ""
@@ -1494,13 +1541,20 @@ Rules:
 {SIGNATURE_HTML}
 </div>"""
 
+    # Pick Gmail label based on draft category
+    _POST_MEETING_CATEGORIES = {"followup", "post_meeting_opp"}
+    draft_label = (
+        "Claude Drafts/Post Meeting" if category in _POST_MEETING_CATEGORIES
+        else "Claude Drafts/Prospecting"
+    )
+
     draft_id = ""
     if gumstack_ok():
         result = gumstack_create(
             to=contact_email,
             subject=subject,
             html_body=html_body,
-            label="Claude Drafts/Post Meeting",
+            label=draft_label,
         )
         if result["success"]:
             draft_id = result["draft_id"]
@@ -1514,7 +1568,7 @@ Rules:
             draft_id=draft_id, to=contact_email, cc="",
             subject=subject, html_body=html_body,
             account_name=account_name,
-            label="Claude Drafts/Post Meeting",
+            label=draft_label,
         )
 
     # ── 7. Send confirmation DM ──

@@ -251,22 +251,34 @@ def draft_batch_emails(cluster_type: str, template_context: str, client):
 
     def _run():
         from handlers.interactive import _draft_smart_email
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+
         drafted = 0
         failed = 0
-        for item in items:
-            try:
-                _draft_smart_email(
-                    account_id=item.get("account_id", ""),
-                    account_name=item.get("account", ""),
-                    opp_id=item.get("opp_id", ""),
-                    product=item.get("product", ""),
-                    category=drafter_category,
-                    client=client,
-                )
-                drafted += 1
-            except Exception as e:
-                logger.warning("Batch draft failed for %s: %s", item.get("account", "?"), e)
-                failed += 1
+
+        def _draft_one(item):
+            _draft_smart_email(
+                account_id=item.get("account_id", ""),
+                account_name=item.get("account", ""),
+                opp_id=item.get("opp_id", ""),
+                product=item.get("product", ""),
+                category=drafter_category,
+                client=client,
+            )
+            return item.get("account", "?")
+
+        # Run 3 drafts concurrently to speed up batch processing
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(_draft_one, item): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    future.result()
+                    drafted += 1
+                except Exception as e:
+                    logger.warning("Batch draft failed for %s: %s", item.get("account", "?"), e)
+                    failed += 1
 
         summary = f"Batch drafting complete: {drafted} drafts created"
         if failed:

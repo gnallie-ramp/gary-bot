@@ -865,6 +865,24 @@ def _get_priority_alerts(max_per_group=5, max_groups=8):
         return None
 
 
+def _touch_line(row_or_item):
+    """Return a compact last-call / last-email context line, or ''."""
+    parts = []
+    for key, label in [("last_call_date", "Call"), ("last_email_date", "Email")]:
+        val = row_or_item.get(key) if hasattr(row_or_item, "get") else None
+        if val is not None and str(val).strip() not in ("", "None", "NaT", "2000-01-01"):
+            try:
+                if hasattr(val, "strftime"):
+                    parts.append(f"{label} {val.strftime('%-m/%-d')}")
+                else:
+                    from datetime import datetime as _dt
+                    d = _dt.strptime(str(val)[:10], "%Y-%m-%d")
+                    parts.append(f"{label} {d.strftime('%-m/%-d')}")
+            except Exception:
+                pass
+    return f"\n   _Last: {' · '.join(parts)}_" if parts else ""
+
+
 def _render_priority_blocks(df, max_per_group, max_groups):
     """Render priority alert blocks from a cached dataframe."""
     import math
@@ -965,6 +983,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
             f"${paced:,}/mo vs ${base:,} baseline (+{pct}%)"
             f"\n   _L30D only ${l30d:,} — window open to lock low baseline_{cp_str}"
             f"\n   _Why: L7D ${l7d:,} is {pct}% above 90D avg, L30D hasn't caught up_"
+            f"{_touch_line(row)}"
         )
 
     def _fmt_close_window(row):
@@ -976,6 +995,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         return (
             f"• {_acct_link(row)} — {product} L7D pacing "
             f"${paced:,}/mo\n   _Close now — L30D baseline would be ${l30d:,}_{cp_str}"
+            f"{_touch_line(row)}"
         )
 
     def _fmt_leading(row):
@@ -984,9 +1004,10 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         base = _safe_int(row.get("baseline_amount", 0))
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
+        touch = _touch_line(row)
         if "Card" in product:
-            return f"• {_acct_link(row)} — {product} L3D pacing ${paced:,}/mo vs ${base:,}/mo baseline{cp_str}"
-        return f"• {_acct_link(row)} — ${paced:,} in bills created/scheduled vs ${base:,}/mo baseline{cp_str}"
+            return f"• {_acct_link(row)} — {product} L3D pacing ${paced:,}/mo vs ${base:,}/mo baseline{cp_str}{touch}"
+        return f"• {_acct_link(row)} — ${paced:,} in bills created/scheduled vs ${base:,}/mo baseline{cp_str}{touch}"
 
     def _fmt_first_bill(row):
         paced = _safe_int(row.get("paced_amount", 0))
@@ -995,6 +1016,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         return (
             f"• {_acct_link(row)} — *first bill created* "
             f"(${paced:,})\n   _Bill Pay opp open — customer just started using the product_{cp_str}"
+            f"{_touch_line(row)}"
         )
 
     def _fmt_close_now(row):
@@ -1002,7 +1024,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         delta = _safe_int(row.get("l30d_spend_delta", 0))
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} • L30D +${abs(delta):,} above baseline{cp_str}"
+        return f"• {_acct_link(row)} — {product} • L30D +${abs(delta):,} above baseline{cp_str}{_touch_line(row)}"
 
     def _fmt_zero_to_one(row):
         product = str(row.get("product", "")).replace(" Expansion", "")
@@ -1024,7 +1046,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         ) if spend_since or spend_30 or spend_7 else ""
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} activated {act_str}{spend_str}{cp_str}"
+        return f"• {_acct_link(row)} — {product} activated {act_str}{spend_str}{cp_str}{_touch_line(row)}"
 
     def _fmt_sustained(row):
         product = str(row.get("product", "")).replace(" Expansion", "")
@@ -1033,7 +1055,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         pct = _pct(paced, base)
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}"
+        return f"• {_acct_link(row)} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}{_touch_line(row)}"
 
     def _fmt_treasury_spike(row):
         paced = _safe_int(row.get("paced_amount", 0))
@@ -1045,6 +1067,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
             f"• {_acct_link(row)} — GLA spiked +{spike_pct}%"
             f"\n   L7D avg ${paced:,} vs L30D avg ${l30d:,}{cp_str}"
             f"\n   _Large deposit — lock in treasury expansion (uncapped H1-26)_"
+            f"{_touch_line(row)}"
         )
 
     _add_group("early_accel", ":zap: *Early Acceleration — Act Now*", groups.get("early_accel", []), _fmt_early)
@@ -1090,7 +1113,7 @@ def _get_non_spend_signals():
                 "text": {"type": "mrkdwn", "text": header},
             })
             for item in items[:3]:
-                acct_name = item.get("account_name", "Unknown")
+                acct_name = item.get("account", item.get("account_name", "Unknown"))
                 acct_id = item.get("account_id", "")
                 sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
                 acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
@@ -1103,6 +1126,7 @@ def _get_non_spend_signals():
                     line += f" — {product}"
                 if detail:
                     line += f"\n   _{detail}_"
+                line += _touch_line(item)
 
                 blocks.append({
                     "type": "section",
@@ -1177,7 +1201,7 @@ def _get_todays_meetings():
                         acct_id = arow.get("account_id", "")
                         acct_name = arow.get("account_name", "")
                         if website_domain in _domain_map:
-                            sf_url = f"https://rampfinancial.lightning.force.com/r/Account/{acct_id}/view"
+                            sf_url = f"https://rampfinancial.lightning.force.com/lightning/r/Account/{acct_id}/view"
                             for midx in _domain_map[website_domain]:
                                 if midx not in sfdc_links:
                                     sfdc_links[midx] = (acct_name, sf_url)

@@ -226,6 +226,8 @@ def _gather_alert_signals() -> list[dict]:
                 "l30d_spend_raw": l30d,
                 "_paced": paced,
                 "_baseline": base,
+                "last_call_date": str(row.get("last_call_date", "") or ""),
+                "last_email_date": str(row.get("last_email_date", "") or ""),
             })
         return items
     except Exception as e:
@@ -303,6 +305,8 @@ def _gather_checkpoint_signals() -> list[dict]:
                 "_baseline": baseline,
                 "_target": target,
                 "_days_since_cw": days_since,
+                "last_call_date": str(row.get("last_call_date", "") or ""),
+                "last_email_date": str(row.get("last_email_date", "") or ""),
             })
 
         items.sort(key=lambda x: -x["priority"])
@@ -344,6 +348,8 @@ def _gather_missing_followups(lookback_days: int = 7) -> list[dict]:
                 "days_since_touch": 0,
                 "_call_name": call_name,
                 "_call_date": call_date,
+                "last_call_date": call_date,
+                "last_email_date": "",
             })
         return items
     except Exception as e:
@@ -444,6 +450,8 @@ def _gather_post_meeting_opps(lookback_days: int = 14) -> list[dict]:
                     "days_since_touch": 0,
                     "_call_name": call_name,
                     "_call_date": call_date,
+                    "last_call_date": call_date,
+                    "last_email_date": "",
                 })
 
         items.sort(key=lambda x: -x["priority"])
@@ -557,6 +565,8 @@ def _gather_stale_opps() -> list[dict]:
                 "_last_email_subj": last_email_subj,
                 "_baseline": baseline,
                 "_recent": recent,
+                "last_call_date": last_call_date,
+                "last_email_date": last_email_date,
             })
 
         items.sort(key=lambda x: -x["priority"])
@@ -693,6 +703,8 @@ def _gather_reopen_opps() -> list[dict]:
                 "_pattern": pattern,
                 "_baseline": baseline,
                 "_current": current,
+                "last_call_date": str(row.get("last_call_date", "") or ""),
+                "last_email_date": str(row.get("last_email_date", "") or ""),
             })
 
         items.sort(key=lambda x: -x["priority"])
@@ -1005,6 +1017,20 @@ def build_category_detail_blocks(category: str) -> list[dict]:
         "text": {"type": "plain_text", "text": f"{icon} {title} — {len(items)} items", "emoji": True},
     }]
 
+    def _touch_str(item):
+        """Compact last-call / last-email line for detail blocks."""
+        parts = []
+        for key, label in [("last_call_date", "Call"), ("last_email_date", "Email")]:
+            val = str(item.get(key, "") or "")
+            if val and val not in ("", "None", "NaT", "2000-01-01"):
+                try:
+                    from datetime import datetime as _dt
+                    d = _dt.strptime(val[:10], "%Y-%m-%d")
+                    parts.append(f"{label} {d.strftime('%-m/%-d')}")
+                except Exception:
+                    pass
+        return f"\n      _Last: {' · '.join(parts)}_" if parts else ""
+
     for i, action in enumerate(items, 1):
         account_id = action.get("account_id", "")
         opp_id = action.get("opp_id", "")
@@ -1012,11 +1038,12 @@ def build_category_detail_blocks(category: str) -> list[dict]:
         name_link = f"<{sf_link}|{action['account']}>"
         product_str = f" — {action['product']}" if action.get("product") else ""
         cp_str = f" | ~{format_currency(action['est_cp'])} CP" if action.get("est_cp") else ""
+        touch = _touch_str(action)
 
         line = (
             f"{action['icon']} *{i}. {name_link}*{product_str}\n"
             f"      *{action['action']}*\n"
-            f"      {action['detail']}{cp_str}"
+            f"      {action['detail']}{cp_str}{touch}"
         )
 
         blocks.append({

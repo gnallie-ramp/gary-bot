@@ -200,7 +200,7 @@ def run_stale_opp_drafter(client):
 
                 # Create Gmail draft via Gumstack MCP with fallback
                 from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
-                draft_label = "Claude Drafts/Post Meeting"
+                draft_label = "Claude Drafts/Prospecting"
                 pending_id = f"stale_opp_{row.get('opportunity_id', '')[:12]}_{contact_email.split('@')[0]}"
 
                 if gumstack_ok():
