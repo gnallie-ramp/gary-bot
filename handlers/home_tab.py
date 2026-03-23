@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime
 
-from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME
+from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME, get_owner_id, set_owner_id, _OWNER_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,15 @@ def register_home_tab(app):
         if tab != "home":
             return
 
+        # Auto-claim ownership on first Home tab open.
+        # Each bot instance runs on a separate machine, so the .owner file
+        # is inherently per-instance. The first user to open the Home tab
+        # becomes this instance's owner — no manual config needed.
+        import os
+        if not os.path.exists(_OWNER_FILE):
+            set_owner_id(user_id)
+            logger.info("Auto-detected bot owner: %s", user_id)
+
         def _publish():
             try:
                 blocks = _build_home_blocks(client, user_id)
@@ -82,6 +91,25 @@ def _build_tab_bar(active):
         elements.append(btn)
     # Slack actions block supports max 25 elements (we have 6)
     return {"type": "actions", "elements": elements}
+
+
+def _build_home_blocks_header(active_tab):
+    """Build just the header + tab bar for instant tab switch feedback."""
+    blocks = []
+    blocks.append({
+        "type": "header",
+        "text": {"type": "plain_text", "text": "Gary — Sales Intelligence Co-Pilot", "emoji": True},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "AI-powered signals, briefs, opps, and drafts — all in Slack. "
+            "Gary monitors your book 24/5."
+        )}],
+    })
+    blocks.append(_build_tab_bar(active_tab))
+    blocks.append({"type": "divider"})
+    return blocks
 
 
 # ── Main router ──────────────────────────────────────────────────────────────
@@ -921,6 +949,23 @@ def _render_priority_blocks(df, max_per_group, max_groups):
     def _pct(paced, base):
         return int(((paced - base) / base) * 100) if base > 0 else 0
 
+    def _presale_line(row):
+        """Show AE presale estimates and flag discrepancies vs actual spend."""
+        product = str(row.get("product", ""))
+        ae_card = _safe_int(row.get("ae_card_presale", 0))
+        ae_bp = _safe_int(row.get("ae_bp_presale", 0))
+        paced = _safe_int(row.get("paced_amount", 0)) or _safe_int(row.get("spend_l30d", 0))
+        presale = ae_card if "Card" in product else ae_bp if "Bill" in product else 0
+        if presale <= 0:
+            return ""
+        if paced > 0 and presale > 0:
+            ratio = paced / presale
+            if ratio >= 2.0:
+                return f"\n   :large_green_circle: _AE presale ${presale:,}/mo — actual {ratio:.1f}x higher → large delta upside_"
+            elif ratio <= 0.3:
+                return f"\n   :warning: _AE presale ${presale:,}/mo — actual only {int(ratio*100)}% → partial migration, room to grow_"
+        return f"\n   _AE presale: ${presale:,}/mo_"
+
     _btn_counter = [0]
 
     def _draft_btn(row, signal_type):
@@ -983,7 +1028,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
             f"${paced:,}/mo vs ${base:,} baseline (+{pct}%)"
             f"\n   _L30D only ${l30d:,} — window open to lock low baseline_{cp_str}"
             f"\n   _Why: L7D ${l7d:,} is {pct}% above 90D avg, L30D hasn't caught up_"
-            f"{_touch_line(row)}"
+            f"{_presale_line(row)}{_touch_line(row)}"
         )
 
     def _fmt_close_window(row):
@@ -995,7 +1040,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         return (
             f"• {_acct_link(row)} — {product} L7D pacing "
             f"${paced:,}/mo\n   _Close now — L30D baseline would be ${l30d:,}_{cp_str}"
-            f"{_touch_line(row)}"
+            f"{_presale_line(row)}{_touch_line(row)}"
         )
 
     def _fmt_leading(row):
@@ -1005,9 +1050,10 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
         touch = _touch_line(row)
+        ps = _presale_line(row)
         if "Card" in product:
-            return f"• {_acct_link(row)} — {product} L3D pacing ${paced:,}/mo vs ${base:,}/mo baseline{cp_str}{touch}"
-        return f"• {_acct_link(row)} — ${paced:,} in bills created/scheduled vs ${base:,}/mo baseline{cp_str}{touch}"
+            return f"• {_acct_link(row)} — {product} L3D pacing ${paced:,}/mo vs ${base:,}/mo baseline{cp_str}{ps}{touch}"
+        return f"• {_acct_link(row)} — ${paced:,} in bills created/scheduled vs ${base:,}/mo baseline{cp_str}{ps}{touch}"
 
     def _fmt_first_bill(row):
         paced = _safe_int(row.get("paced_amount", 0))
@@ -1016,7 +1062,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         return (
             f"• {_acct_link(row)} — *first bill created* "
             f"(${paced:,})\n   _Bill Pay opp open — customer just started using the product_{cp_str}"
-            f"{_touch_line(row)}"
+            f"{_presale_line(row)}{_touch_line(row)}"
         )
 
     def _fmt_close_now(row):
@@ -1024,7 +1070,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         delta = _safe_int(row.get("l30d_spend_delta", 0))
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} • L30D +${abs(delta):,} above baseline{cp_str}{_touch_line(row)}"
+        return f"• {_acct_link(row)} — {product} • L30D +${abs(delta):,} above baseline{cp_str}{_presale_line(row)}{_touch_line(row)}"
 
     def _fmt_zero_to_one(row):
         product = str(row.get("product", "")).replace(" Expansion", "")
@@ -1046,7 +1092,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         ) if spend_since or spend_30 or spend_7 else ""
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} activated {act_str}{spend_str}{cp_str}{_touch_line(row)}"
+        return f"• {_acct_link(row)} — {product} activated {act_str}{spend_str}{cp_str}{_presale_line(row)}{_touch_line(row)}"
 
     def _fmt_sustained(row):
         product = str(row.get("product", "")).replace(" Expansion", "")
@@ -1055,7 +1101,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         pct = _pct(paced, base)
         cp = _safe_int(row.get("est_cp", 0))
         cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
-        return f"• {_acct_link(row)} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}{_touch_line(row)}"
+        return f"• {_acct_link(row)} — {product} pacing ${paced:,}/mo vs ${base:,} baseline (+{pct}%){cp_str}{_presale_line(row)}{_touch_line(row)}"
 
     def _fmt_treasury_spike(row):
         paced = _safe_int(row.get("paced_amount", 0))
@@ -1384,6 +1430,20 @@ def register_home_tab_actions(app):
         user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         _active_tab[user_id] = tab_name
+
+        # Publish an immediate loading state so the tab switch feels responsive
+        try:
+            loading_blocks = _build_home_blocks_header(tab_name)
+            loading_blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": ":hourglass_flowing_sand: Loading..."},
+            })
+            client.views_publish(
+                user_id=user_id,
+                view={"type": "home", "blocks": loading_blocks},
+            )
+        except Exception:
+            pass  # Non-critical — continue to full refresh
 
         def _refresh():
             try:

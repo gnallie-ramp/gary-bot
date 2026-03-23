@@ -197,6 +197,19 @@ def _format_signal_entry(row, signal_type):
     else:
         text = f"\u2022 {_acct_link(row)} — {product}{cp_str}"
 
+    # Append AE presale discrepancy if available
+    full_product = str(row.get("product", ""))
+    ae_card = _safe_int(row.get("ae_card_presale", 0))
+    ae_bp = _safe_int(row.get("ae_bp_presale", 0))
+    actual = paced or l30d
+    presale = ae_card if "Card" in full_product else ae_bp if "Bill" in full_product else 0
+    if presale > 0 and actual > 0:
+        ratio = actual / presale
+        if ratio >= 2.0:
+            text += f"\n   :large_green_circle: _AE presale ${presale:,}/mo — actual {ratio:.1f}x higher_"
+        elif ratio <= 0.3:
+            text += f"\n   :warning: _AE presale ${presale:,}/mo — only {int(ratio*100)}% migrated_"
+
     return text, _draft_button(row, signal_type)
 
 

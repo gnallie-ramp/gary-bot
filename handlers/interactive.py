@@ -20,6 +20,15 @@ from config import GREG_SLACK_ID, OWNER_NAME, OWNER_FIRST_NAME, BOOKING_LINK
 
 logger = logging.getLogger(__name__)
 
+_WIN_REASON_PRODUCT = {
+    "Card Expansion": "card payments",
+    "Bill Pay Expansion": "bill pay",
+    "Treasury Expansion": "treasury/cash management",
+    "Travel Expansion": "travel bookings",
+    "SaaS Expansion": "SaaS management",
+    "Procurement Expansion": "procurement",
+}
+
 
 def register_interactive_handlers(app):
     """Register button and action handlers."""
@@ -120,6 +129,7 @@ def register_interactive_handlers(app):
         rationale = payload.get("rationale", "")
         next_step = payload.get("next_step", "")
         next_step_due_date = payload.get("next_step_due_date", "")
+        gong_link = payload.get("gong_link", "")
 
         if not account_id:
             client.chat_postMessage(
@@ -192,6 +202,24 @@ def register_interactive_handlers(app):
                             fields["Primary_Contact__c"] = poc_result[0]["Main_POC__c"]
                     except Exception:
                         pass  # Non-critical — skip if lookup fails
+
+                # Pre-fill Gong call URL — use payload value or fall back to Snowflake
+                gong_url = gong_link
+                if not gong_url and account_id:
+                    try:
+                        from core.salesforce_client import get_gong_call_url
+                        gong_url = get_gong_call_url(account_id)
+                    except Exception:
+                        pass
+                if gong_url:
+                    fields["Gong_Outreach_Link__c"] = gong_url
+
+                # Pre-fill WinReasonDetail__c
+                product_label = _WIN_REASON_PRODUCT.get(product, product)
+                win_detail = f"Migrating {product_label} into Ramp for consolidation"
+                if rationale:
+                    win_detail = f"{win_detail} — {rationale}"
+                fields["WinReasonDetail__c"] = win_detail[:500]
 
                 opp_id = create_opportunity(fields)
                 if opp_id:
@@ -313,8 +341,24 @@ def register_interactive_handlers(app):
                     fields["NextStep"] = next_step[:255]
                 if notes:
                     fields["Expansion_Notes__c"] = notes[:200]
-                if gong_link:
-                    fields["Gong_Outreach_Link__c"] = gong_link
+                # Pre-fill Gong call URL — use payload value or fall back to Snowflake
+                gong_url = gong_link
+                if not gong_url and account_id:
+                    try:
+                        from core.salesforce_client import get_gong_call_url
+                        gong_url = get_gong_call_url(account_id)
+                    except Exception:
+                        pass
+                if gong_url:
+                    fields["Gong_Outreach_Link__c"] = gong_url
+
+                # Pre-fill WinReasonDetail__c
+                product_label = _WIN_REASON_PRODUCT.get(product, product)
+                win_detail = f"Migrating {product_label} into Ramp for consolidation"
+                if notes:
+                    win_detail = f"{win_detail} — {notes}"
+                fields["WinReasonDetail__c"] = win_detail[:500]
+
                 if amount and float(amount) > 0:
                     amt_str = str(int(float(amount)))
                     if product == "Card Expansion":

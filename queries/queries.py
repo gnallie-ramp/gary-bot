@@ -2783,6 +2783,13 @@ last_call AS (
     JOIN greg_accounts ga ON ga.account_id = gt.account_id
     GROUP BY 1
 ),
+ae_presale AS (
+    SELECT sa.account_id,
+           COALESCE(sa.ae_qualified_monthly_spend, 0) AS ae_card_presale,
+           COALESCE(sa.ae_estimated_bill_pay_spend, 0) AS ae_bp_presale
+    FROM analytics.marts.dim_sfdc_accounts sa
+    WHERE sa.account_id IN (SELECT DISTINCT account_id FROM combined)
+),
 ranked AS (
     SELECT
         *,
@@ -2814,10 +2821,13 @@ SELECT
     r.l30d_spend_delta, r.activation_date, r.paced_amount, r.baseline_amount,
     r.spend_since_opp, r.spend_l30d, r.spend_l7d, r.est_cp,
     le.last_email_date,
-    lc.last_call_date
+    lc.last_call_date,
+    COALESCE(ap.ae_card_presale, 0) AS ae_card_presale,
+    COALESCE(ap.ae_bp_presale, 0) AS ae_bp_presale
 FROM ranked r
 LEFT JOIN last_email le ON le.account_id = r.account_id
 LEFT JOIN last_call lc ON lc.account_id = r.account_id
+LEFT JOIN ae_presale ap ON ap.account_id = r.account_id
 WHERE r.rn <= 30
 ORDER BY
     CASE signal_type

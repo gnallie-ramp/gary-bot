@@ -18,6 +18,33 @@ BOOKING_LINK = os.getenv("BOOKING_LINK", "https://ramp-com.chilipiper.com/me/gre
 # Backward-compat alias — existing code imports this everywhere
 GREG_SLACK_ID = OWNER_SLACK_ID
 
+# ── Auto-detected owner (per-instance, stored locally) ───────────────────────
+_OWNER_FILE = os.path.join(os.path.dirname(__file__), ".owner")
+
+
+def get_owner_id() -> str:
+    """Return the owner Slack user ID for THIS bot instance.
+
+    Priority:
+    1. Local .owner file (auto-set on first Home tab open)
+    2. OWNER_SLACK_ID from .env
+    """
+    if os.path.exists(_OWNER_FILE):
+        with open(_OWNER_FILE) as f:
+            stored = f.read().strip()
+            if stored:
+                return stored
+    return OWNER_SLACK_ID
+
+
+def set_owner_id(user_id: str) -> None:
+    """Persist the owner Slack user ID for this instance.
+
+    Called automatically on first app_home_opened event.
+    """
+    with open(_OWNER_FILE, "w") as f:
+        f.write(user_id)
+
 # ── Slack ─────────────────────────────────────────────────────────────────────
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")  # xapp- token for socket mode

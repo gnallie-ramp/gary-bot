@@ -496,6 +496,7 @@ def _send_followup_dm(results, client):
 
                 # Create Opp button payload
                 call_id = item.get("call_id", "")
+                gong_link = f"https://us-11688.app.gong.io/call?id={call_id}" if call_id else ""
                 opp_payload = json.dumps({
                     "account_name": account_name,
                     "account_id": account_id,
@@ -507,6 +508,7 @@ def _send_followup_dm(results, client):
                     "next_step": next_step,
                     "next_step_due_date": next_step_due,
                     "meeting_id": call_id,
+                    "gong_link": gong_link,
                 })
 
                 blocks.append({

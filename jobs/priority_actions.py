@@ -86,6 +86,24 @@ def _pct(paced, base):
     return int(((paced - base) / base) * 100) if base > 0 else 0
 
 
+def _presale_detail(row):
+    """Return presale discrepancy line for detail_lines, or empty string."""
+    product = str(row.get("product", ""))
+    ae_card = _safe_int(row.get("ae_card_presale", 0))
+    ae_bp = _safe_int(row.get("ae_bp_presale", 0))
+    paced = _safe_int(row.get("paced_amount", 0)) or _safe_int(row.get("spend_l30d", 0))
+    presale = ae_card if "Card" in product else ae_bp if "Bill" in product else 0
+    if presale <= 0:
+        return ""
+    if paced > 0 and presale > 0:
+        ratio = paced / presale
+        if ratio >= 2.0:
+            return f"AE presale {format_currency(presale)}/mo — actual {ratio:.1f}x higher → large delta upside"
+        elif ratio <= 0.3:
+            return f"AE presale {format_currency(presale)}/mo — actual only {int(ratio*100)}% → partial migration, room to grow"
+    return f"AE presale: {format_currency(presale)}/mo"
+
+
 def _gather_alert_signals() -> list[dict]:
     """All spend/acceleration signals from HOME_PRIORITY_ALERTS_QUERY.
 
@@ -209,6 +227,10 @@ def _gather_alert_signals() -> list[dict]:
 
             else:
                 continue
+
+            ps = _presale_detail(row)
+            if ps:
+                detail_lines.append(ps)
 
             items.append({
                 "type": signal_type,

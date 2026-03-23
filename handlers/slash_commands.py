@@ -12,7 +12,7 @@ from core.slack_formatter import (
 from core.email_context import get_email_context, format_email_context_line, format_email_context_block
 from queries.queries import ACCOUNT_LOOKUP_QUERY, ACCOUNT_OPPS_QUERY, GONG_MEETINGS_QUERY
 from utils.account_resolver import fetch_contact_emails
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME, get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,21 @@ logger = logging.getLogger(__name__)
 def register_slash_commands(app):
     """Register all slash commands with the Bolt app."""
 
+    def _is_owner(command):
+        """Check if the command was sent by this bot instance's owner.
+
+        Uses auto-detected owner from .owner file (set on first Home tab open),
+        falling back to OWNER_SLACK_ID from .env. This ensures each bot instance
+        only responds to its own user — no cross-talk between instances.
+        """
+        return command.get("user_id") == get_owner_id()
+
     @app.command("/gary-lookup")
     def handle_gary_lookup(ack, command, client, respond):
         """Account snapshot: products, spend, opps, contacts."""
         ack()
+        if not _is_owner(command):
+            return
         search_term = command.get("text", "").strip()
         if not search_term:
             respond("Usage: `/gary-lookup <account name>`")
@@ -115,6 +126,8 @@ def register_slash_commands(app):
     def handle_gary_opps(ack, command, client, respond):
         """Open opp summary with CP values."""
         ack()
+        if not _is_owner(command):
+            return
 
         try:
             df = run_query(ACCOUNT_OPPS_QUERY)
@@ -176,6 +189,8 @@ def register_slash_commands(app):
     def handle_gary_brief(ack, command, client, respond):
         """Pre-call brief for an account."""
         ack()
+        if not _is_owner(command):
+            return
         search_term = command.get("text", "").strip()
         if not search_term:
             respond("Usage: `/gary-brief <account name>`")
@@ -325,6 +340,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_pipeline_cleanup(ack, command, client, respond):
         """On-demand pipeline cleanup analysis."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running pipeline cleanup — this may take a minute...")
 
         def _run():
@@ -351,6 +368,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
             /post-meeting ondeck 7     — latest call for account in last 7 days
         """
         ack()
+        if not _is_owner(command):
+            return
         text = command.get("text", "").strip()
 
         lookback_days = 2
@@ -396,6 +415,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_opp_pacing(ack, command, client, respond):
         """On-demand opp pacing report. Accepts optional account name filter."""
         ack()
+        if not _is_owner(command):
+            return
         account_name = command.get("text", "").strip() or None
 
         if account_name:
@@ -420,6 +441,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_zero_to_one(ack, command, client, respond):
         """On-demand zero-to-one activation alert."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Checking zero-to-one activations — this may take a minute...")
 
         def _run():
@@ -439,6 +462,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_forecast(ack, command, client, respond):
         """On-demand weekly forecast refresh."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running forecast — this may take a minute...")
 
         def _run():
@@ -460,6 +485,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_status(ack, command, client, respond):
         """Health check: connections, schedules, dedup state."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running status check...")
 
         def _run():
@@ -479,6 +506,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_help(ack, command, client, respond):
         """Full capability listing with examples."""
         ack()
+        if not _is_owner(command):
+            return
 
         def _run():
             try:
@@ -497,6 +526,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_test(ack, command, client, respond):
         """Run all jobs in test mode to verify everything works."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Starting full test suite — this will take 1-2 minutes. Results coming via DM...")
 
         def _run():
@@ -516,6 +547,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_morning_brief(ack, command, client, respond):
         """On-demand morning brief — combined daily action summary."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Generating morning brief...")
 
         def _run():
@@ -535,6 +568,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_priorities(ack, command, client, respond):
         """Priority actions — the single ranked list of what to do now."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Building priority actions — this may take 30-60 seconds...")
 
         def _run():
@@ -556,6 +591,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_quota_heartbeat(ack, command, client, respond):
         """On-demand quota heartbeat — CP attainment + accelerator band."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running quota heartbeat...")
 
         def _run():
@@ -575,6 +612,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_spend_pacing(ack, command, client, respond):
         """On-demand spend pacing — MTD vs last month, YoY, trajectory."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running spend pacing analysis...")
 
         def _run():
@@ -594,6 +633,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_post_close(ack, command, client, respond):
         """On-demand post-close CP monitor — activation + baseline tracking."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running post-close CP monitor...")
 
         def _run():
@@ -613,6 +654,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_activity_report(ack, command, client, respond):
         """On-demand activity report — SQLs created + opps closed by product."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running activity report...")
 
         def _run():
@@ -632,6 +675,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_top_accounts(ack, command, client, respond):
         """On-demand account tiering — Top 50 ranked by CP potential."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Running account tiering — this may take a minute...")
 
         def _run():
@@ -651,6 +696,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_batch_outreach(ack, command, client, respond):
         """On-demand batch outreach — cluster accounts + draft campaigns."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Building batch outreach campaigns...")
 
         def _run():
@@ -670,6 +717,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_nudge(ack, command, client, respond):
         """On-demand proactive nudge — what's new + highest-value suggestions."""
         ack()
+        if not _is_owner(command):
+            return
         respond("Checking for new signals...")
 
         def _run():
@@ -689,6 +738,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_bill_drafter(ack, command, client, respond):
         """On-demand bill drafter sweep. Accepts optional lookback: 2h (default), 24h, 7d."""
         ack()
+        if not _is_owner(command):
+            return
         text = command.get("text", "").strip().lower()
 
         # Parse lookback window
@@ -746,6 +797,13 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
           /opp ondeck card 50k | send contract | consolidating AP from 3 vendors
         """
         ack()
+        logger.info(
+            "/opp received — user=%s api_app_id=%s owner=%s is_owner=%s",
+            command.get("user_id"), command.get("api_app_id"),
+            get_owner_id(), _is_owner(command),
+        )
+        if not _is_owner(command):
+            return
         text = command.get("text", "").strip()
         if not text:
             respond(

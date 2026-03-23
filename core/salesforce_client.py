@@ -132,6 +132,31 @@ def update_opportunity(opp_id: str, fields: dict) -> bool:
         return False
 
 
+def get_gong_call_url(account_id: str) -> str:
+    """Get the most recent Gong call URL for an SFDC account via Snowflake.
+
+    Returns the URL string, or empty string on failure / no results.
+    """
+    try:
+        from core.snowflake_client import run_query
+        sql = f"""
+            SELECT igc.gong_call_url
+            FROM analytics.int.int_gong_calls igc
+            JOIN analytics.marts.dim_sfdc_gong_call gc ON gc.gong_call_id = igc.gong_call_id
+            WHERE gc.sfdc_primary_account_id = '{account_id}'
+            AND igc.gong_call_url IS NOT NULL
+            ORDER BY igc.call_start_at DESC
+            LIMIT 1
+        """
+        df = run_query(sql)
+        if df is not None and not df.empty:
+            url = df.iloc[0].get("gong_call_url", "")
+            return str(url) if url else ""
+    except Exception as e:
+        logger.debug("Gong call URL lookup failed for %s: %s", account_id, e)
+    return ""
+
+
 def query(soql: str) -> list[dict]:
     """Run a SOQL query and return the records.
 
