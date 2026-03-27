@@ -2,16 +2,18 @@
 import logging
 from core.snowflake_client import run_query
 from core.slack_formatter import quota_heartbeat_blocks, format_currency
-from queries.queries import REALIZED_CP_QUERY
+from queries.queries import REALIZED_CP_QUERY, format_query
 from utils.cp_calculator import compute_realized_cp
 from config import GREG_SLACK_ID, NTR_RATES
 
 logger = logging.getLogger(__name__)
 
-def run_quota_heartbeat(client):
+def run_quota_heartbeat(client, user_id=None):
     """Run EOD quota attainment summary and DM Greg."""
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
-        raw_df = run_query(REALIZED_CP_QUERY)
+        raw_df = run_query(format_query(REALIZED_CP_QUERY, user_id=user_id))
         if raw_df.empty:
             logger.info("Quota heartbeat: no realized CP data")
             return
@@ -71,7 +73,7 @@ def run_quota_heartbeat(client):
         # Append missed opps nudge from priority_actions cache
         try:
             from jobs.priority_actions import get_cached_category
-            missed = get_cached_category("post_meeting_opp")
+            missed = get_cached_category("post_meeting_opp", user_id=dm_target)
             if missed:
                 missed_text = f"\U0001f3af *{len(missed)} expansion product{'s' if len(missed) != 1 else ''} discussed on calls — no opp created*"
                 top_missed = missed[:3]
@@ -88,7 +90,7 @@ def run_quota_heartbeat(client):
         except Exception:
             pass
 
-        client.chat_postMessage(channel=GREG_SLACK_ID, blocks=blocks, text="EOD Quota Heartbeat")
+        client.chat_postMessage(channel=dm_target, blocks=blocks, text="EOD Quota Heartbeat")
         logger.info("Quota heartbeat sent: total CP %s, attainment %s", summary["total_cp"], summary["attainment_pct"])
 
     except Exception as e:

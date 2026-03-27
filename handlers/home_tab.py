@@ -7,12 +7,13 @@ import threading
 import time
 from datetime import datetime
 
-from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME, get_owner_id, set_owner_id, _OWNER_FILE
+from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME
+from core.user_registry import is_registered, register_user, get_user, get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level cache for priority alerts (10-min TTL) ──────────────────────
-_priority_cache = {"data": None, "fetched_at": 0}
+_priority_cache = {}  # user_id -> {"data": ..., "fetched_at": ...}
 _PRIORITY_CACHE_TTL = 600  # 10 minutes
 
 # ── Tab state per user ───────────────────────────────────────────────────────
@@ -20,6 +21,7 @@ _active_tab = {}  # user_id -> tab name
 _TABS = [
     ("dashboard", ":house: Dashboard"),
     ("pipeline", ":dart: Pipeline"),
+    ("stale", ":alarm_clock: Stale Opps"),
     ("meetings", ":calendar: Meetings"),
     ("drafts", ":email: Drafts"),
     ("instructions", ":books: Instructions"),
@@ -53,14 +55,11 @@ def register_home_tab(app):
         if tab != "home":
             return
 
-        # Auto-claim ownership on first Home tab open.
-        # Each bot instance runs on a separate machine, so the .owner file
-        # is inherently per-instance. The first user to open the Home tab
-        # becomes this instance's owner — no manual config needed.
-        import os
-        if not os.path.exists(_OWNER_FILE):
-            set_owner_id(user_id)
-            logger.info("Auto-detected bot owner: %s", user_id)
+        # Show registration form for unregistered users
+        if not is_registered(user_id):
+            blocks = _build_registration_blocks()
+            client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            return
 
         def _publish():
             try:
@@ -73,6 +72,22 @@ def register_home_tab(app):
                 logger.error("Home tab publish failed: %s", e)
 
         threading.Thread(target=_publish, daemon=True).start()
+
+
+# ── Registration screen for new users ────────────────────────────────────────
+
+def _build_registration_blocks():
+    """Build welcome screen for unregistered users."""
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "Welcome to Gary Bot", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": (
+            "*Gary* is an AI-powered sales intelligence co-pilot that monitors your book 24/5.\n\n"
+            "Spend signals, pre-call briefs, post-meeting follow-ups, opp creation, email drafts — all in Slack.\n\n"
+            "To get started, click the button below and fill in your details."
+        )}},
+        {"type": "divider"},
+        {"type": "actions", "elements": [{"type": "button", "text": {"type": "plain_text", "text": "Get Started", "emoji": True}, "action_id": "open_registration_modal", "style": "primary"}]},
+    ]
 
 
 # ── Tab bar builder ──────────────────────────────────────────────────────────
@@ -141,6 +156,7 @@ def _build_home_blocks(client, user_id):
     tab_builders = {
         "dashboard": _build_dashboard_tab,
         "pipeline": _build_pipeline_tab,
+        "stale": _build_stale_tab,
         "meetings": _build_meetings_tab,
         "drafts": _build_drafts_tab,
         "instructions": _build_instructions_tab,
@@ -177,16 +193,16 @@ def _build_dashboard_tab(client, user_id):
     blocks = []
 
     # Quota Snapshot
-    quota_blocks = _get_quota_snapshot()
+    quota_blocks = _get_quota_snapshot(user_id=user_id)
     if quota_blocks:
         blocks.extend(quota_blocks)
         blocks.append({"type": "divider"})
 
     # Priority Alerts (condensed — first 3 groups, 3 per group)
-    alert_blocks = _get_priority_alerts(max_per_group=3, max_groups=4)
+    alert_blocks = _get_priority_alerts(user_id, max_per_group=3, max_groups=4)
     if alert_blocks:
         blocks.extend(alert_blocks)
-        blocks.append(_updated_at_block(_priority_cache.get("fetched_at", 0)))
+        blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
         blocks.append({
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": "_Switch to the :dart: Pipeline tab for all signals_"}],
@@ -228,10 +244,10 @@ def _build_pipeline_tab(client, user_id):
     """Pipeline: Full priority alerts with all signal groups expanded."""
     blocks = []
 
-    alert_blocks = _get_priority_alerts(max_per_group=5, max_groups=8)
+    alert_blocks = _get_priority_alerts(user_id, max_per_group=5, max_groups=8)
     if alert_blocks:
         blocks.extend(alert_blocks)
-        blocks.append(_updated_at_block(_priority_cache.get("fetched_at", 0)))
+        blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
     else:
         blocks.append({
             "type": "section",
@@ -239,10 +255,185 @@ def _build_pipeline_tab(client, user_id):
         })
 
     # Non-spend signals (stale, reopen, post-meeting, underperforming)
-    nonsignal_blocks = _get_non_spend_signals()
+    nonsignal_blocks = _get_non_spend_signals(user_id=user_id)
     if nonsignal_blocks:
         blocks.append({"type": "divider"})
         blocks.extend(nonsignal_blocks)
+
+    return blocks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Stale Opps
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-user sort preference for stale tab
+_stale_sort = {}  # user_id -> "cp" | "staleness"
+
+def _fmt_currency(val):
+    """Format a number as $X,XXX or $X.XK."""
+    if val is None or val <= 0:
+        return "$0"
+    if val >= 1000:
+        return f"${val:,.0f}"
+    return f"${val:,.0f}"
+
+
+def _build_stale_tab(client, user_id):
+    """Stale Opps: Rich cards for opps needing re-engagement, sorted by CP or staleness."""
+    from jobs.priority_actions import get_cached_category
+
+    blocks = []
+    items = get_cached_category("stale", user_id=user_id)
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:alarm_clock: Stale Opps — Re-Engage*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Opps with no meeting or email activity in 21+ days. "
+            "Sorted by estimated CP value. Draft an email to get them back on the calendar."
+        )}],
+    })
+
+    if not items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No stale opps right now — your pipeline is active._"},
+        })
+        return blocks
+
+    # Sort toggle
+    sort_mode = _stale_sort.get(user_id, "cp")
+    if sort_mode == "staleness":
+        items = sorted(items, key=lambda x: -x.get("days_since_touch", 0))
+        sort_label = "Sorted by staleness"
+        toggle_label = "Sort by CP"
+        toggle_value = "cp"
+    else:
+        # Default: already sorted by priority (CP-weighted) from priority_actions
+        sort_label = "Sorted by est. CP"
+        toggle_label = "Sort by Staleness"
+        toggle_value = "staleness"
+
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": f":arrows_counterclockwise: {toggle_label}", "emoji": True},
+            "action_id": f"stale_sort_{toggle_value}",
+        }],
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f"_{sort_label} · {len(items)} opp{'s' if len(items) != 1 else ''}_"}],
+    })
+
+    # Render opp cards — one section block per opp with accessory Draft button
+    _stale_btn_counter = [0]
+    for item in items:
+        _stale_btn_counter[0] += 1
+        acct_name = item.get("account", "Unknown")
+        acct_id = item.get("account_id", "")
+        opp_id = item.get("opp_id", "")
+        product = str(item.get("product", "")).replace(" Expansion", "")
+        stage = item.get("stage", "")
+        days_stale = item.get("days_since_touch", 0)
+        est_cp = item.get("est_cp", 0)
+        baseline = item.get("_baseline", 0)
+        recent = item.get("_recent", 0)
+        call_summary = item.get("_call_summary", "")
+        last_call_name = item.get("_last_call_name", "")
+        last_call_date = item.get("_last_call_date", "")
+        last_email_subj = item.get("_last_email_subj", "")
+        last_email_date = item.get("last_email_date", "")
+        product_requests = item.get("_product_requests", "")
+        competitors = item.get("_competitors", "")
+        activation_status = item.get("activation_status", "") if "activation_status" in item else ""
+
+        # SFDC link
+        sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+        acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+
+        # Build card text
+        lines = [f"*{acct_str}*  —  {product}"]
+
+        # Stage + staleness + CP line
+        meta = f"{stage} · {days_stale}d stale"
+        if est_cp > 0:
+            meta += f" · ~{_fmt_currency(est_cp)} CP"
+        lines.append(meta)
+
+        # Activation + spend
+        if activation_status:
+            _STATUS_ICONS = {
+                "No spend yet": "\u26aa",
+                "Very low": "\U0001f7e4",
+                "Below baseline": "\U0001f7e1",
+                "Near baseline": "\U0001f7e2",
+                "Exceeding baseline": "\U0001f534",
+            }
+            icon = _STATUS_ICONS.get(activation_status, "")
+            lines.append(f"{icon} {activation_status} — Baseline: {_fmt_currency(baseline)} | L30D: {_fmt_currency(recent)}")
+
+        # Last call context
+        if last_call_name and last_call_date:
+            lines.append(f":telephone_receiver: Last call: _{last_call_name}_ ({last_call_date})")
+            if call_summary:
+                summary_short = call_summary[:150] + "..." if len(call_summary) > 150 else call_summary
+                lines.append(f"   _{summary_short}_")
+
+        # Last email
+        if last_email_subj and last_email_date and last_email_date != "2000-01-01":
+            subj_short = last_email_subj[:40] + "..." if len(last_email_subj) > 40 else last_email_subj
+            lines.append(f":email: Last email: \"{subj_short}\" ({last_email_date})")
+
+        # Competitors / product requests
+        if competitors:
+            lines.append(f":crossed_swords: Competitors: {competitors}")
+        if product_requests:
+            req_short = product_requests[:80] + "..." if len(product_requests) > 80 else product_requests
+            lines.append(f":bulb: Asked about: {req_short}")
+
+        # Urgency callout
+        if activation_status == "Exceeding baseline":
+            lines.append("*:rotating_light: Spend above baseline — close ASAP to capture CP*")
+        elif activation_status == "No spend yet":
+            lines.append("_No activation yet — re-engage or push close date_")
+
+        card_text = "\n".join(lines)
+        # Slack text block limit: 3000 chars
+        if len(card_text) > 2900:
+            card_text = card_text[:2900] + "..."
+
+        # Draft button payload
+        payload = json.dumps({
+            "account": acct_name,
+            "account_id": acct_id,
+            "opp_id": opp_id,
+            "product": product,
+            "category": "stale",
+        })
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": card_text},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":envelope: Draft", "emoji": True},
+                "action_id": f"draft_outreach_stale_{_stale_btn_counter[0]}",
+                "value": payload,
+            },
+        })
+
+        # Divider between cards (skip after last)
+        if _stale_btn_counter[0] < len(items):
+            blocks.append({"type": "divider"})
+
+    blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
 
     return blocks
 
@@ -260,7 +451,7 @@ def _build_meetings_tab(client, user_id):
         "text": {"type": "mrkdwn", "text": "*:calendar: Today's Customer Meetings*"},
     })
 
-    meetings_blocks = _get_todays_meetings()
+    meetings_blocks = _get_todays_meetings(user_id)
     if meetings_blocks:
         blocks.extend(meetings_blocks)
     else:
@@ -289,7 +480,7 @@ def _build_drafts_tab(client, user_id):
     try:
         from utils.pending_drafts import list_pending
 
-        pending = list_pending()
+        pending = list_pending(user_id=user_id)
         if pending:
             blocks.append({
                 "type": "section",
@@ -581,7 +772,7 @@ def _build_settings_tab(client, user_id):
     """Settings: DM alert toggles + drafting toggles."""
     blocks = []
 
-    settings_blocks = _get_settings_blocks()
+    settings_blocks = _get_settings_blocks(user_id)
     if settings_blocks:
         blocks.extend(settings_blocks)
 
@@ -592,7 +783,7 @@ def _build_settings_tab(client, user_id):
 # DATA FETCHERS (unchanged from original)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_quota_snapshot():
+def _get_quota_snapshot(user_id=None):
     """Pull quota data from Looker CSVs for the home tab.
 
     Returns a list of Slack blocks (not a single string) so we can include
@@ -604,11 +795,14 @@ def _get_quota_snapshot():
         from jobs.quota_insights import (
             _find_csv, _parse_wide_csv, _parse_dollar, _parse_pct,
             _get_team_ranking, _latest_period_with_data, _short_period,
-            _TMP_DIR, _GREG_NAME,
+            _TMP_DIR,
         )
-        from core.gmail_client import fetch_looker_zip
+        from core.gumstack_gmail import fetch_looker_zip
+        from core.user_registry import get_user_sf_name
         from config import DISPLAY_TIMEZONE
         import os
+
+        _user_name = get_user_sf_name(user_id)
 
         et = pytz.timezone(DISPLAY_TIMEZONE)
         now_et = datetime.now(et)
@@ -688,7 +882,7 @@ def _get_quota_snapshot():
             return f"${val:,.0f}"
 
         # Realized CP
-        greg_realized = realized_data.get(_GREG_NAME, {})
+        greg_realized = realized_data.get(_user_name, {})
         current_r_period = None
         for p in realized_periods:
             if current_month_label in p:
@@ -720,7 +914,7 @@ def _get_quota_snapshot():
             )
 
         # Renewal CP
-        greg_renewal = renewal_data.get(_GREG_NAME, {})
+        greg_renewal = renewal_data.get(_user_name, {})
         current_n_period = None
         for p in renewal_periods:
             if current_month_label in p:
@@ -744,8 +938,8 @@ def _get_quota_snapshot():
 
         # SQLs by product
         def _sql_row(data, periods, label, hint):
-            greg_d = data.get(_GREG_NAME, {})
-            period = _latest_period_with_data(data, _GREG_NAME, periods, hint)
+            greg_d = data.get(_user_name, {})
+            period = _latest_period_with_data(data, _user_name, periods, hint)
             if not period or period not in greg_d:
                 return None
             d = greg_d[period]
@@ -778,10 +972,10 @@ def _get_quota_snapshot():
 
         # CW CP by product
         def _cw_row(data, periods, label, hint):
-            period = _latest_period_with_data(data, _GREG_NAME, periods, hint)
+            period = _latest_period_with_data(data, _user_name, periods, hint)
             if not period:
                 return None
-            greg_d = data.get(_GREG_NAME, {})
+            greg_d = data.get(_user_name, {})
             if period not in greg_d:
                 return None
             d = greg_d[period]
@@ -851,11 +1045,13 @@ def _get_quota_snapshot():
         return None
 
 
-def _get_priority_alerts(max_per_group=5, max_groups=8):
-    """Pull priority alerts from Snowflake with 10-min cache.
+def _get_priority_alerts(user_id, max_per_group=5, max_groups=8):
+    """Pull priority alerts from Snowflake with 10-min per-user cache.
 
     Parameters
     ----------
+    user_id : str
+        Slack user ID (used for per-user cache and query parameterization).
     max_per_group : int
         Max entries shown per signal group.
     max_groups : int
@@ -868,21 +1064,23 @@ def _get_priority_alerts(max_per_group=5, max_groups=8):
     # Return cached data if still fresh — but we need to re-render with
     # the current max_per_group/max_groups, so cache the raw dataframe
     cached_df = None
-    if _priority_cache["data"] is not None and (now - _priority_cache["fetched_at"]) < _PRIORITY_CACHE_TTL:
-        cached_df = _priority_cache["data"]
+    user_cache = _priority_cache.get(user_id, {})
+    if user_cache.get("data") is not None and (now - user_cache.get("fetched_at", 0)) < _PRIORITY_CACHE_TTL:
+        cached_df = user_cache["data"]
 
     try:
         if cached_df is None:
             from core.snowflake_client import run_query
-            from queries.queries import HOME_PRIORITY_ALERTS_QUERY
+            from queries.queries import HOME_PRIORITY_ALERTS_QUERY, format_query
 
-            df = run_query(HOME_PRIORITY_ALERTS_QUERY)
+            query = format_query(HOME_PRIORITY_ALERTS_QUERY, user_id=user_id)
+            df = run_query(query)
 
             if df.empty:
-                _priority_cache = {"data": None, "fetched_at": now}
+                _priority_cache[user_id] = {"data": None, "fetched_at": now}
                 return None
 
-            _priority_cache = {"data": df, "fetched_at": now}
+            _priority_cache[user_id] = {"data": df, "fetched_at": now}
             cached_df = df
 
         # Render blocks from dataframe
@@ -1131,7 +1329,7 @@ def _render_priority_blocks(df, max_per_group, max_groups):
     return blocks
 
 
-def _get_non_spend_signals():
+def _get_non_spend_signals(user_id: str = None):
     """Pull non-spend priority signals (stale, reopen, underperforming, followup)
     from the priority_actions cache for the Pipeline tab."""
     try:
@@ -1149,7 +1347,7 @@ def _get_non_spend_signals():
 
         has_content = False
         for category, header in _NON_SPEND_CATEGORIES:
-            items = get_cached_category(category)
+            items = get_cached_category(category, user_id=user_id)
             if not items:
                 continue
 
@@ -1198,7 +1396,7 @@ def _get_non_spend_signals():
         return None
 
 
-def _get_todays_meetings():
+def _get_todays_meetings(user_id=None):
     """Pull ALL of today's meetings from Google Calendar."""
     try:
         from core.google_calendar_client import (
@@ -1206,7 +1404,7 @@ def _get_todays_meetings():
             extract_external_attendees, format_meeting_time,
         )
 
-        meetings = get_todays_meetings(max_results=25)
+        meetings = get_todays_meetings(max_results=25, user_id=user_id)
         meetings = [m for m in meetings if is_customer_meeting(m)]
         if not meetings:
             return [{
@@ -1228,6 +1426,7 @@ def _get_todays_meetings():
         if _domain_map:
             try:
                 from core.snowflake_client import run_query
+                sf_name = get_user_sf_name(user_id) if user_id else OWNER_NAME
                 q = f"""
                 SELECT sa.account_id, sa.account_name, sa.website
                 FROM analytics.marts.dim_sfdc_accounts sa
@@ -1235,7 +1434,7 @@ def _get_todays_meetings():
                     SELECT DISTINCT account_id
                     FROM analytics.agg.agg_sfdc__daily_account_owner_ledger
                     WHERE date_day = CURRENT_DATE - 1
-                      AND owner_name = '{OWNER_NAME}'
+                      AND owner_name = '{sf_name}'
                 ) ga ON ga.account_id = sa.account_id
                 WHERE sa.website IS NOT NULL
                 """
@@ -1320,12 +1519,12 @@ def _get_todays_meetings():
         return None
 
 
-def _get_settings_blocks():
+def _get_settings_blocks(user_id=None):
     """Build settings toggle blocks for the home tab."""
     try:
         from utils.settings import load_settings
 
-        settings = load_settings()
+        settings = load_settings(user_id)
 
         blocks = []
         blocks.append({
@@ -1420,6 +1619,48 @@ def register_home_tab_actions(app):
     """Register button actions from the Home tab."""
     from config import GREG_SLACK_ID
 
+    # ── Registration flow ────────────────────────────────────────────────
+    @app.action("open_registration_modal")
+    def handle_open_registration(ack, body, client):
+        ack()
+        client.views_open(
+            trigger_id=body["trigger_id"],
+            view={
+                "type": "modal",
+                "callback_id": "registration_modal_submit",
+                "title": {"type": "plain_text", "text": "Register for Gary Bot"},
+                "submit": {"type": "plain_text", "text": "Register"},
+                "blocks": [
+                    {"type": "input", "block_id": "reg_sf_name", "label": {"type": "plain_text", "text": "Full Name (as it appears in Salesforce)"}, "element": {"type": "plain_text_input", "action_id": "sf_name_input", "placeholder": {"type": "plain_text", "text": "e.g. Gregory Nallie"}}},
+                    {"type": "input", "block_id": "reg_first_name", "label": {"type": "plain_text", "text": "First Name"}, "element": {"type": "plain_text_input", "action_id": "first_name_input", "placeholder": {"type": "plain_text", "text": "e.g. Greg"}}},
+                    {"type": "input", "block_id": "reg_email", "label": {"type": "plain_text", "text": "Ramp Email"}, "element": {"type": "plain_text_input", "action_id": "email_input", "placeholder": {"type": "plain_text", "text": "e.g. gnallie@ramp.com"}}},
+                    {"type": "input", "block_id": "reg_booking", "label": {"type": "plain_text", "text": "Booking Link (Chilipiper)"}, "element": {"type": "plain_text_input", "action_id": "booking_input", "placeholder": {"type": "plain_text", "text": "https://ramp-com.chilipiper.com/me/your-name/ramp"}}, "optional": True},
+                    {"type": "input", "block_id": "reg_sfdc_user_id", "label": {"type": "plain_text", "text": "SFDC User ID"}, "element": {"type": "plain_text_input", "action_id": "sfdc_user_id_input", "placeholder": {"type": "plain_text", "text": "Find in Salesforce URL: /lightning/settings/personal/PersonalInformation (18-char ID starting with 005)"}}, "optional": True},
+                ],
+            },
+        )
+
+    @app.view("registration_modal_submit")
+    def handle_registration_submit(ack, body, client, view):
+        ack()
+        user_id = body["user"]["id"]
+        values = view["state"]["values"]
+        sf_name = values["reg_sf_name"]["sf_name_input"]["value"].strip()
+        first_name = values["reg_first_name"]["first_name_input"]["value"].strip()
+        email = values["reg_email"]["email_input"]["value"].strip()
+        booking = (values["reg_booking"]["booking_input"]["value"] or "").strip()
+        sfdc_user_id = (values["reg_sfdc_user_id"]["sfdc_user_id_input"]["value"] or "").strip()
+
+        register_user(user_id, sf_name, first_name, email, booking, sfdc_user_id=sfdc_user_id)
+        logger.info("User registered: %s (%s)", sf_name, user_id)
+
+        # Refresh home tab to show the real dashboard
+        try:
+            blocks = _build_home_blocks(client, user_id)
+            client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+        except Exception as e:
+            logger.error("Home tab refresh after registration failed: %s", e)
+
     # ── Tab switching ────────────────────────────────────────────────────
     @app.action({"action_id": re.compile(r"^home_tab_switch_")})
     def handle_tab_switch(ack, body, client):
@@ -1457,6 +1698,30 @@ def register_home_tab_actions(app):
 
         threading.Thread(target=_refresh, daemon=True).start()
 
+    # ── Stale Opps sort toggle ───────────────────────────────────────────
+    @app.action({"action_id": re.compile(r"^stale_sort_")})
+    def handle_stale_sort(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        action_id = action.get("action_id", "")
+        sort_mode = action_id.replace("stale_sort_", "", 1)  # "cp" or "staleness"
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        _stale_sort[user_id] = sort_mode
+
+        # Refresh home tab (already on stale tab)
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(
+                    user_id=user_id,
+                    view={"type": "home", "blocks": blocks},
+                )
+            except Exception as e:
+                logger.error("Stale sort toggle failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
     # ── Flush drafts button ──────────────────────────────────────────────
     @app.action("home_flush_drafts")
     def handle_flush_drafts(ack, body, client):
@@ -1466,26 +1731,26 @@ def register_home_tab_actions(app):
         def _flush():
             try:
                 from utils.pending_drafts import flush_to_gmail, list_pending
-                pending = list_pending()
+                pending = list_pending(user_id=user_id)
                 if not pending:
-                    client.chat_postMessage(channel=GREG_SLACK_ID, text="No pending drafts to flush.")
+                    client.chat_postMessage(channel=user_id, text="No pending drafts to flush.")
                     return
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Flushing {len(pending)} pending draft{'s' if len(pending) != 1 else ''} to Gmail...",
                 )
-                succeeded, failed = flush_to_gmail()
+                succeeded, failed = flush_to_gmail(user_id=user_id)
                 msg = f"Flush complete — {succeeded} draft{'s' if succeeded != 1 else ''} created in Gmail."
                 if failed:
                     msg += f" {failed} failed (check Gumstack auth at gumloop.com/personal/apps)."
-                client.chat_postMessage(channel=GREG_SLACK_ID, text=msg)
+                client.chat_postMessage(channel=user_id, text=msg)
 
                 # Refresh the drafts tab
                 blocks = _build_home_blocks(client, user_id)
                 client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
             except Exception as e:
                 logger.error("Home tab flush drafts failed: %s", e)
-                client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Draft flush failed: {e}")
+                client.chat_postMessage(channel=user_id, text=f"Draft flush failed: {e}")
 
         threading.Thread(target=_flush, daemon=True).start()
 
@@ -1506,16 +1771,17 @@ def register_home_tab_actions(app):
         def _make_handler(mod_path, fn_name):
             def handler(ack, body, client):
                 ack()
+                handler_user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
                 def _run():
                     try:
                         import importlib
                         mod = importlib.import_module(mod_path)
                         fn = getattr(mod, fn_name)
-                        fn(client)
+                        fn(client, user_id=handler_user_id)
                     except Exception as e:
                         logger.error("Home tab action %s failed: %s", fn_name, e)
                         client.chat_postMessage(
-                            channel=GREG_SLACK_ID,
+                            channel=handler_user_id,
                             text=f"Home tab action failed: {e}",
                         )
                 threading.Thread(target=_run, daemon=True).start()

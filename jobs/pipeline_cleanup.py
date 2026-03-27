@@ -18,9 +18,11 @@ from queries.queries import (
     ACCOUNT_NOTES_QUERY,
     ACCOUNT_EMAILS_FULL_QUERY,
     GONG_FULL_TRANSCRIPT_QUERY,
+    format_query,
 )
 from utils.account_resolver import fetch_contact_emails, is_hash_like
-from config import GREG_SLACK_ID, OWNER_NAME
+from config import GREG_SLACK_ID
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,7 @@ def _fetch_opp_enrichment(account_id, notes_cache, emails_cache):
 
     # Contacts
     try:
-        contacts = fetch_contact_emails(conn, [account_id])
+        contacts = fetch_contact_emails(None, [account_id])
         result["contacts"] = contacts.get(account_id, [])
     except Exception:
         pass
@@ -146,7 +148,7 @@ def _fetch_opp_enrichment(account_id, notes_cache, emails_cache):
 # ── Claude analysis ──────────────────────────────────────────────────────────
 
 
-def _analyze_opp_for_cleanup(opp_row: dict, enrichment: dict) -> list[dict]:
+def _analyze_opp_for_cleanup(opp_row: dict, enrichment: dict, owner_name: str = "") -> list[dict]:
     """Send opp + enrichment to Claude for structured recommendations."""
     # Build context strings from enrichment data
     calls_text = ""
@@ -201,7 +203,7 @@ def _analyze_opp_for_cleanup(opp_row: dict, enrichment: dict) -> list[dict]:
             contacts_text += f" <{c_email}>"
         contacts_text += "\n"
 
-    prompt = f"""You are helping {OWNER_NAME}, a Growth Account Manager at Ramp, clean up his pipeline. Analyze this opportunity and provide specific, evidence-based recommendations.
+    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, clean up their pipeline. Analyze this opportunity and provide specific, evidence-based recommendations.
 
 OPPORTUNITY DATA:
 - Account: {opp_row.get('account_name', '')}
@@ -240,7 +242,7 @@ Analyze this opp and return a JSON array of recommendations. Each recommendation
     "recommended": "what it should be changed to",
     "evidence": "quote the specific call excerpt, email text, or AM note that supports this",
     "confidence": "High | Medium | Low",
-    "action": "the specific thing Greg should do"
+    "action": "the specific thing {owner_name} should do"
   }}
 ]
 
@@ -407,7 +409,7 @@ def _build_cleanup_blocks(ranked_results: list[dict]) -> list[dict]:
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 
-def run_pipeline_cleanup(client, force=False):
+def run_pipeline_cleanup(client, user_id=None, force=False):
     """Run full pipeline cleanup: load, pre-filter, enrich, analyze, DM Greg.
 
     Parameters
@@ -418,8 +420,11 @@ def run_pipeline_cleanup(client, force=False):
         When True, bypass pre-filtering (used by slash command). All open opps
         from the query are analyzed.
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+
     try:
-        all_opps = run_query(CLEANUP_OPPS_QUERY)
+        all_opps = run_query(format_query(CLEANUP_OPPS_QUERY, user_id=user_id))
         if all_opps.empty:
             logger.info("Pipeline cleanup: no opps to analyze")
             return
@@ -502,7 +507,7 @@ def run_pipeline_cleanup(client, force=False):
 
         def _analyze_one(row_dict: dict) -> dict | None:
             enrichment = enrichment_cache.get(row_dict["account_id"], {})
-            recs = _analyze_opp_for_cleanup(row_dict, enrichment)
+            recs = _analyze_opp_for_cleanup(row_dict, enrichment, owner_name=owner_name)
             if recs:
                 return {
                     "opp": row_dict,
@@ -534,7 +539,7 @@ def run_pipeline_cleanup(client, force=False):
         # Build and send Slack message
         blocks = _build_cleanup_blocks(results)
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Pipeline Cleanup — {len(results)} opps need attention",
         )

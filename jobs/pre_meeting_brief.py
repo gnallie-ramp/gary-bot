@@ -28,11 +28,12 @@ from core.email_context import get_email_context, format_email_context_block
 from queries.queries import (
     ACCOUNT_LOOKUP_QUERY, ACCOUNT_OPPS_QUERY,
     GONG_FULL_TRANSCRIPT_QUERY, ACCOUNT_EMAILS_FULL_QUERY,
-    ACCOUNT_NOTES_QUERY,
+    ACCOUNT_NOTES_QUERY, format_query,
 )
 from utils.account_resolver import fetch_contact_emails
 from utils.dedup import tracker
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, NTR_RATES
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ _LOOKAHEAD_MIN = 90
 _MIN_DURATION = 15
 
 
-def run_pre_meeting_brief(client, force=False):
+def run_pre_meeting_brief(client, user_id=None, force=False):
     """Check calendar for upcoming customer meetings and send auto-briefs.
 
     Parameters
@@ -52,13 +53,16 @@ def run_pre_meeting_brief(client, force=False):
     force : bool
         If True, send briefs for ALL upcoming meetings (ignores dedup).
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+
     try:
         # Fetch meetings in the next 90 minutes
-        meetings = get_upcoming_meetings(days_ahead=1, max_results=15)
+        meetings = get_upcoming_meetings(days_ahead=1, max_results=15, user_id=user_id)
         if not meetings:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="No upcoming calendar meetings found.",
                 )
             return
@@ -83,37 +87,39 @@ def run_pre_meeting_brief(client, force=False):
         if not upcoming:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text=f"No customer meetings in the next {_LOOKAHEAD_MIN} minutes.",
                 )
             return
 
         for meeting in upcoming:
-            _process_meeting(meeting, client, force)
+            _process_meeting(meeting, client, force, dm_target=dm_target, owner_name=owner_name, user_id=user_id)
 
     except Exception as e:
         logger.error("Pre-meeting brief failed: %s", e)
         if force:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 text=f"Pre-meeting brief failed: {e}",
             )
 
 
-def _process_meeting(meeting, client, force):
+def _process_meeting(meeting, client, force, dm_target=None, owner_name: str = "", user_id: str = None):
     """Generate and send an expansion-focused brief for a single meeting."""
+    if not owner_name:
+        owner_name = get_user_sf_name(None)
     event_id = meeting.get("event_id", "")
     dedup_key = f"pre_brief_{event_id}"
 
-    if not force and tracker.is_processed(dedup_key):
+    if not force and tracker.is_processed(dedup_key, user_id=user_id):
         return
 
     # Match to SFDC account
-    match = match_meeting_to_account(meeting)
+    match = match_meeting_to_account(meeting, user_id=user_id)
     if not match:
         # Can't match — send a lightweight heads-up instead
-        _send_unmatched_alert(meeting, client)
-        tracker.mark_processed(dedup_key)
+        _send_unmatched_alert(meeting, client, dm_target=dm_target)
+        tracker.mark_processed(dedup_key, user_id=user_id)
         return
 
     account_id = match["account_id"]
@@ -123,7 +129,7 @@ def _process_meeting(meeting, client, force):
     try:
         # ── 1. Account basics (spend data) ──
         safe_name = account_name.replace("'", "''").replace("%", "\\%")
-        acct_df = run_query(ACCOUNT_LOOKUP_QUERY.format(search_term=safe_name))
+        acct_df = run_query(format_query(ACCOUNT_LOOKUP_QUERY, user_id=user_id, search_term=safe_name))
         if acct_df.empty:
             logger.warning("Pre-brief: account %s not found in lookup", account_name)
             return
@@ -136,7 +142,7 @@ def _process_meeting(meeting, client, force):
         treasury_l30 = float(row.get("treasury_l30d", 0) or 0)
 
         # ── 2. Open expansion opps + AE qualified amounts ──
-        opps_df = run_query(ACCOUNT_OPPS_QUERY)
+        opps_df = run_query(format_query(ACCOUNT_OPPS_QUERY, user_id=user_id))
         acct_opps = opps_df[opps_df["account_id"] == account_id] if not opps_df.empty else pd.DataFrame()
 
         opps_text = ""
@@ -322,9 +328,9 @@ def _process_meeting(meeting, client, force):
         activation_text = "\n".join(f"- {a}" for a in activation_opps) if activation_opps else "All core products activated"
 
         # ── 9. Generate brief via Claude (expansion-focused) ──
-        prompt = f"""You are a sales analyst helping {OWNER_NAME}, a Growth AM at Ramp, prepare for a customer call.
-{OWNER_NAME}'s comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals. He earns comp on incremental spend
-above baseline during a 90-day window after closing an opp. His goal is to maximize SQL production and
+        prompt = f"""You are a sales analyst helping {owner_name}, a Growth AM at Ramp, prepare for a customer call.
+{owner_name}'s comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals. They earn comp on incremental spend
+above baseline during a 90-day window after closing an opp. Their goal is to maximize SQL production and
 expansion discovery during this call.
 
 This meeting is in {minutes_until} minutes (at {time_str}).
@@ -361,9 +367,9 @@ EMAIL SIGNALS (pain points, interest, willingness to meet):
 
 Write a 200-word expansion-focused pre-call brief covering:
 1. SPEND GAP ANALYSIS: Where is actual spend vs AE estimate? Any significant discrepancies to probe?
-2. SQL OPPORTUNITIES: Which products should Greg push for? Any uncovered products or activation plays?
+2. SQL OPPORTUNITIES: Which products should {owner_name} push for? Any uncovered products or activation plays?
 3. TRANSCRIPT INTELLIGENCE: What did the customer say about expansion, pain points, or blockers in past calls?
-4. PREPARED TALKING POINTS: 3 specific things Greg should bring up to advance expansion or create a new opp
+4. PREPARED TALKING POINTS: 3 specific things {owner_name} should bring up to advance expansion or create a new opp
 5. THE ASK: One specific close or commitment to attempt on this call
 
 Be direct and specific. Every point should tie to comp impact. This is a 2-minute glance before the call."""
@@ -434,18 +440,18 @@ Be direct and specific. Every point should tie to comp impact. This is a 2-minut
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Pre-call brief: {account_name} in {minutes_until} min",
         )
-        tracker.mark_processed(dedup_key)
+        tracker.mark_processed(dedup_key, user_id=user_id)
         logger.info("Pre-meeting brief sent for %s (event=%s)", account_name, event_id)
 
     except Exception as e:
         logger.error("Pre-meeting brief for %s failed: %s", account_name, e)
 
 
-def _send_unmatched_alert(meeting, client):
+def _send_unmatched_alert(meeting, client, dm_target=None):
     """Send a lightweight alert for a meeting we can't match to an account."""
     external = extract_external_attendees(meeting)
     if not external:
@@ -459,7 +465,7 @@ def _send_unmatched_alert(meeting, client):
     )
 
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         text=(
             f"\U0001f4c5 Meeting in {minutes_until} min: *{meeting['title']}* ({time_str})\n"
             f"Attendees: {attendee_str}\n"

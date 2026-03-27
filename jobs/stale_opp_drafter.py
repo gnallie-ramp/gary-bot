@@ -7,11 +7,11 @@ from core.snowflake_client import run_query
 from core.claude_client import call_claude
 from utils.pending_drafts import save_draft as save_pending_draft
 from core.slack_formatter import sf_opp_url, simple_dm_blocks, format_currency
-from config import OWNER_NAME
-from queries.queries import STALE_OPPS_QUERY, ACCOUNT_NOTES_QUERY, ACCOUNT_EMAILS_FULL_QUERY
-from utils.account_resolver import fetch_contact_emails, is_hash_like
-from templates.signature import SIGNATURE_HTML
 from config import GREG_SLACK_ID
+from core.user_registry import get_user_sf_name, get_user_first_name
+from queries.queries import STALE_OPPS_QUERY, ACCOUNT_NOTES_QUERY, ACCOUNT_EMAILS_FULL_QUERY, format_query
+from utils.account_resolver import fetch_contact_emails, is_hash_like
+from templates.signature import build_signature
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _build_emails_text(email_rows):
     return "\n\n".join(lines)
 
 
-def _generate_reengage_email(opp_row, contact_name, sfdc_notes, email_comms):
+def _generate_reengage_email(opp_row, contact_name, sfdc_notes, email_comms, owner_name: str = "", owner_first_name: str = ""):
     """Generate a re-engagement email via Claude with full context."""
     product = opp_row.get("expansion_subtype", "")
     stage = opp_row.get("opportunity_stage_name", "")
@@ -74,7 +74,7 @@ def _generate_reengage_email(opp_row, contact_name, sfdc_notes, email_comms):
 
     first_name = contact_name.split()[0] if contact_name else ""
 
-    prompt = f"""You are helping {OWNER_NAME}, a Growth Account Manager at Ramp, re-engage a stalled expansion opportunity.
+    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, re-engage a stalled expansion opportunity.
 
 Account: {acct_name}
 Product: {product}
@@ -95,7 +95,7 @@ Spend context:
 SFDC Account Notes:
 {sfdc_notes if sfdc_notes else 'No notes on file'}
 
-Recent Email History (Outreach/SFDC-logged — shows what Greg has already sent):
+Recent Email History (Outreach/SFDC-logged — shows what {owner_first_name or owner_name} has already sent):
 {email_comms if email_comms else 'No recent emails'}
 
 Last call summary:
@@ -104,7 +104,7 @@ Last call summary:
 Product requests from last call:
 {prod_req if prod_req else 'None'}
 
-Write a short re-engagement email from Greg to the customer. Rules:
+Write a short re-engagement email from {owner_first_name or owner_name} to the customer. Rules:
 - Address the contact by first name ({first_name if first_name else 'use generic greeting'})
 - Reference the most recent call or email context to show continuity — USE THE ACTUAL EMAIL/CALL CONTENT ABOVE, don't be generic
 - If the customer replied with interest or a specific question in recent emails, pick up that thread
@@ -115,15 +115,19 @@ Write a short re-engagement email from Greg to the customer. Rules:
 - Tone: warm, direct, peer-to-peer — not salesy
 - DO NOT use bullet points
 - DO NOT use subject line — return body only
-- Sign off as "Greg" """
+- Sign off as "{owner_first_name or owner_name}" """
 
     return call_claude(prompt, max_tokens=512)
 
 
-def run_stale_opp_drafter(client):
+def run_stale_opp_drafter(client, user_id=None):
     """Find stale opps, generate re-engagement emails, create drafts, DM Greg summary."""
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+    owner_first_name = get_user_first_name(user_id)
+
     try:
-        df = run_query(STALE_OPPS_QUERY)
+        df = run_query(format_query(STALE_OPPS_QUERY, user_id=user_id))
         if df.empty:
             logger.info("Stale opp drafter: no stale opps found")
             return
@@ -163,16 +167,33 @@ def run_stale_opp_drafter(client):
             account_id = row.get("account_id", "")
             product = row.get("expansion_subtype", "")
 
-            # Find best contact
+            # Find best contact + CC anyone with prior comms
             acct_contacts = contacts_by_account.get(account_id, [])
             contact_email = ""
             contact_name = ""
+            cc_emails = []
 
-            for c in acct_contacts:
-                if c.get("email") and not is_hash_like(c.get("name", "")):
+            # Build set of emails with prior engagement (email or Gong)
+            engaged_emails = set()
+            for e in emails_by_account.get(account_id, []):
+                ext = (str(e.get("external_contact_email", "") or "")).strip().lower()
+                if ext and "@" in ext:
+                    engaged_emails.add(ext)
+
+            valid_contacts = [
+                c for c in acct_contacts
+                if c.get("email") and not is_hash_like(c.get("name", ""))
+            ]
+
+            for c in valid_contacts:
+                if not contact_email:
                     contact_email = c["email"]
                     contact_name = c.get("name", "")
-                    break
+                else:
+                    em = c["email"].lower()
+                    if em in engaged_emails and em != contact_email.lower():
+                        cc_emails.append(c["email"])
+            cc_string = ", ".join(cc_emails[:3])
 
             if not contact_email:
                 logger.info("Skipping %s — no contact email found", acct_name)
@@ -184,14 +205,15 @@ def run_stale_opp_drafter(client):
 
             try:
                 # Generate email body with full context
-                body_text = _generate_reengage_email(row, contact_name, sfdc_notes, email_comms)
+                body_text = _generate_reengage_email(row, contact_name, sfdc_notes, email_comms, owner_name=owner_name, owner_first_name=owner_first_name)
 
                 # Build HTML body
+                sig_html = build_signature(user_id=dm_target)
                 html_body = f"""<div style="font-family:Arial,sans-serif;font-size:14px;color:#000;max-width:600px;">
 <!-- claude-auto-draft -->
 {body_text.replace(chr(10), '<br>')}
 <br>
-{SIGNATURE_HTML}
+{sig_html}
 </div>"""
 
                 # Generate subject via Claude
@@ -206,19 +228,21 @@ def run_stale_opp_drafter(client):
                 if gumstack_ok():
                     gm_result = gumstack_create(
                         to=contact_email, subject=subject, html_body=html_body,
-                        label=draft_label,
+                        cc=cc_string, label=draft_label, user_id=dm_target,
                     )
                     if not gm_result["success"]:
                         save_pending_draft(
-                            draft_id=pending_id, to=contact_email, cc="",
+                            draft_id=pending_id, to=contact_email, cc=cc_string,
                             subject=subject, html_body=html_body,
                             account_name=acct_name, label=draft_label,
+                            user_id=dm_target,
                         )
                 else:
                     save_pending_draft(
-                        draft_id=pending_id, to=contact_email, cc="",
+                        draft_id=pending_id, to=contact_email, cc=cc_string,
                         subject=subject, html_body=html_body,
                         account_name=acct_name, label=draft_label,
+                        user_id=dm_target,
                     )
 
                 drafted.append({
@@ -253,7 +277,7 @@ def run_stale_opp_drafter(client):
 
         body = "\n".join(lines)
         blocks = simple_dm_blocks("Stale Opp Drafts", body)
-        client.chat_postMessage(channel=GREG_SLACK_ID, blocks=blocks, text="Stale Opp Re-Engagement Drafts")
+        client.chat_postMessage(channel=dm_target, blocks=blocks, text="Stale Opp Re-Engagement Drafts")
         logger.info("Stale opp drafter: %d drafts created, %d errors", len(drafted), len(errors))
 
     except Exception as e:

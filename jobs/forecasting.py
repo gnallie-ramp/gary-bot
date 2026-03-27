@@ -12,11 +12,12 @@ from datetime import datetime
 
 import pandas as pd
 
-from queries.queries import FORECASTING_PIPELINE_QUERY
+from queries.queries import FORECASTING_PIPELINE_QUERY, format_query
 from core.snowflake_client import run_query
 from core.claude_client import call_claude_json
 from core.slack_formatter import sf_opp_url, format_currency, simple_dm_blocks, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, NTR_RATES
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,7 @@ def _build_opp_context(row: pd.Series) -> dict:
 # Claude coaching brief
 # ---------------------------------------------------------------------------
 
-def _build_claude_prompt(closing_opps: list[dict], s2_opps: list[dict]) -> str:
+def _build_claude_prompt(closing_opps: list[dict], s2_opps: list[dict], owner_name: str = "") -> str:
     """Assemble the prompt that Claude will use to generate the coaching brief."""
 
     def _opp_lines(opps: list[dict]) -> str:
@@ -179,15 +180,15 @@ def _build_claude_prompt(closing_opps: list[dict], s2_opps: list[dict]) -> str:
     closing_text = _opp_lines(closing_opps)
     s2_text = _opp_lines(s2_opps)
 
-    prompt = f"""You are a sales coach helping {OWNER_NAME}, a Growth Account Manager at Ramp.
-{OWNER_NAME} manages ~4,000 Plus segment accounts. His comp is 75% Realized CP (expansion opps)
-and 25% SaaS Renewals. He earns comp on spend ABOVE baseline during a 90-day window
+    prompt = f"""You are a sales coach helping {owner_name}, a Growth Account Manager at Ramp.
+{owner_name} manages ~4,000 Plus segment accounts. Their comp is 75% Realized CP (expansion opps)
+and 25% SaaS Renewals. They earn comp on spend ABOVE baseline during a 90-day window
 after closing an opp. Baseline = L30D spend at close-won date. CP = (post-close spend -
 baseline) * NTR. Timing closes is everything — close early to lock in low baseline.
 
 NTR rates: Card 95bps, Bill Pay 15bps, Treasury 5bps, Travel 350bps.
 
-Here are his pipeline opps for this week's forecast:
+Here are their pipeline opps for this week's forecast:
 
 == S3+ OPPS CLOSING THIS MONTH ==
 {closing_text}
@@ -211,7 +212,7 @@ Analyze the pipeline and return a JSON object (no markdown fences) with these ke
    competitor mentions, not-interested signals, long gaps in activity. Be specific
    with account names and dates.
 
-5. "momentum": A 1-2 sentence assessment of this week's pipeline trajectory — is Greg
+5. "momentum": A 1-2 sentence assessment of this week's pipeline trajectory — is {owner_name}
    building momentum or losing it? What's the single most important thing to focus on?
 
 Return ONLY the JSON object."""
@@ -354,7 +355,7 @@ def _build_blocks(
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_forecasting(client, force=False):
+def run_forecasting(client, user_id=None, force=False):
     """Generate weekly forecasting briefing and DM Greg.
 
     Parameters
@@ -364,9 +365,12 @@ def run_forecasting(client, force=False):
     force : bool
         When True, run regardless of day-of-week checks (for manual triggers).
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+
     try:
         # ── Pull pipeline data ──
-        df = run_query(FORECASTING_PIPELINE_QUERY)
+        df = run_query(format_query(FORECASTING_PIPELINE_QUERY, user_id=user_id))
 
         if df.empty:
             logger.info("Forecasting: no pipeline data returned")
@@ -376,7 +380,7 @@ def run_forecasting(client, force=False):
                     "No open pipeline opps found for this week's forecast.",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Weekly Forecast — no data",
                 )
             return
@@ -396,7 +400,7 @@ def run_forecasting(client, force=False):
         s2_opps = [_build_opp_context(row) for _, row in s2_df.iterrows()]
 
         # ── Call Claude for coaching brief ──
-        prompt = _build_claude_prompt(closing_opps, s2_opps)
+        prompt = _build_claude_prompt(closing_opps, s2_opps, owner_name=owner_name)
         brief = call_claude_json(prompt, max_tokens=2000)
 
         summary = brief.get("summary", "Pipeline summary unavailable.")
@@ -431,7 +435,7 @@ def run_forecasting(client, force=False):
         )
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Weekly Forecast — Week of {week_label}",
         )
@@ -449,7 +453,7 @@ def run_forecasting(client, force=False):
                     f"Forecasting job failed:\n```{e}```",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Weekly Forecast — Error",
                 )
             except Exception:

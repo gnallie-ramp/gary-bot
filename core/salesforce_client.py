@@ -49,7 +49,29 @@ def ensure_auth() -> bool:
         return False
 
 
-def create_opportunity(fields: dict) -> str | None:
+def _is_auth_error(error_msg: str) -> bool:
+    """Check if an SF CLI error indicates an expired auth session."""
+    auth_keywords = [
+        "expired", "invalid_grant", "INVALID_SESSION_ID",
+        "Session expired", "Authentication", "auth",
+        "org login", "refresh token", "NOT_FOUND",
+    ]
+    msg_lower = str(error_msg).lower()
+    return any(kw.lower() in msg_lower for kw in auth_keywords)
+
+
+def _alert_if_auth_error(error: Exception, user_id: str | None = None) -> None:
+    """If the error looks like an auth failure, send an inline alert."""
+    if _is_auth_error(str(error)):
+        try:
+            from utils.auth_health import alert_auth_failure
+            from config import GREG_SLACK_ID
+            alert_auth_failure("salesforce", user_id or GREG_SLACK_ID, str(error)[:200])
+        except Exception:
+            pass  # Don't let alert failures break the caller
+
+
+def create_opportunity(fields: dict, user_id: str | None = None) -> str | None:
     """Create an Opportunity record in Salesforce.
 
     Parameters
@@ -66,6 +88,8 @@ def create_opportunity(fields: dict) -> str | None:
                 "Expansion_Type__c": "New Card Programs",
                 ...
             }
+    user_id : str, optional
+        Slack user ID for auth failure alerts.
 
     Returns
     -------
@@ -94,10 +118,11 @@ def create_opportunity(fields: dict) -> str | None:
         return opp_id
     except Exception as e:
         logger.error("Failed to create Salesforce Opportunity: %s", e)
+        _alert_if_auth_error(e, user_id=user_id)
         return None
 
 
-def update_opportunity(opp_id: str, fields: dict) -> bool:
+def update_opportunity(opp_id: str, fields: dict, user_id: str | None = None) -> bool:
     """Update fields on an existing Opportunity record.
 
     Parameters
@@ -106,6 +131,8 @@ def update_opportunity(opp_id: str, fields: dict) -> bool:
         Salesforce Opportunity ID.
     fields : dict
         Field API names -> new values.
+    user_id : str, optional
+        Slack user ID for auth failure alerts.
 
     Returns
     -------
@@ -129,6 +156,7 @@ def update_opportunity(opp_id: str, fields: dict) -> bool:
         return True
     except Exception as e:
         logger.error("Failed to update Salesforce Opportunity %s: %s", opp_id, e)
+        _alert_if_auth_error(e, user_id=user_id)
         return False
 
 

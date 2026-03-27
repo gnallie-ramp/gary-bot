@@ -10,9 +10,10 @@ from core.slack_formatter import (
     dashboard_url, EXPANSION_PRODUCT_MAP,
 )
 from core.email_context import get_email_context, format_email_context_line, format_email_context_block
-from queries.queries import ACCOUNT_LOOKUP_QUERY, ACCOUNT_OPPS_QUERY, GONG_MEETINGS_QUERY
+from queries.queries import ACCOUNT_LOOKUP_QUERY, ACCOUNT_OPPS_QUERY, GONG_MEETINGS_QUERY, format_query
+from core.user_registry import is_registered, get_user
 from utils.account_resolver import fetch_contact_emails
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME, get_owner_id
+from config import GREG_SLACK_ID, NTR_RATES
 
 logger = logging.getLogger(__name__)
 
@@ -20,20 +21,20 @@ logger = logging.getLogger(__name__)
 def register_slash_commands(app):
     """Register all slash commands with the Bolt app."""
 
-    def _is_owner(command):
-        """Check if the command was sent by this bot instance's owner.
-
-        Uses auto-detected owner from .owner file (set on first Home tab open),
-        falling back to OWNER_SLACK_ID from .env. This ensures each bot instance
-        only responds to its own user — no cross-talk between instances.
-        """
-        return command.get("user_id") == get_owner_id()
+    def _check_user(command, respond=None):
+        uid = command.get("user_id", "")
+        if not is_registered(uid):
+            if respond:
+                respond("You're not registered with Gary Bot yet. Open the *Home* tab to get started.")
+            return None
+        return get_user(uid)
 
     @app.command("/gary-lookup")
     def handle_gary_lookup(ack, command, client, respond):
         """Account snapshot: products, spend, opps, contacts."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         search_term = command.get("text", "").strip()
         if not search_term:
@@ -43,7 +44,7 @@ def register_slash_commands(app):
         try:
             # Sanitize search term for SQL LIKE
             safe_term = search_term.replace("'", "''").replace("%", "\\%")
-            df = run_query(ACCOUNT_LOOKUP_QUERY.format(search_term=safe_term))
+            df = run_query(format_query(ACCOUNT_LOOKUP_QUERY, user_id=command["user_id"], search_term=safe_term))
 
             if df.empty:
                 respond(f"No accounts found matching *{search_term}*")
@@ -104,7 +105,7 @@ def register_slash_commands(app):
 
                 # Email context
                 try:
-                    email_ctx = get_email_context(account_id, acct_name, days=30)
+                    email_ctx = get_email_context(account_id, acct_name, days=30, user_id=command["user_id"])
                     if email_ctx.get("email_count", 0) > 0:
                         lines.append(f"\u2709\ufe0f {format_email_context_line(email_ctx)}")
                 except Exception:
@@ -126,11 +127,12 @@ def register_slash_commands(app):
     def handle_gary_opps(ack, command, client, respond):
         """Open opp summary with CP values."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
 
         try:
-            df = run_query(ACCOUNT_OPPS_QUERY)
+            df = run_query(format_query(ACCOUNT_OPPS_QUERY, user_id=command["user_id"]))
 
             if df.empty:
                 respond("No open expansion opps found.")
@@ -189,7 +191,8 @@ def register_slash_commands(app):
     def handle_gary_brief(ack, command, client, respond):
         """Pre-call brief for an account."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         search_term = command.get("text", "").strip()
         if not search_term:
@@ -201,7 +204,7 @@ def register_slash_commands(app):
 
             # Look up account
             safe_term = search_term.replace("'", "''").replace("%", "\\%")
-            acct_df = run_query(ACCOUNT_LOOKUP_QUERY.format(search_term=safe_term))
+            acct_df = run_query(format_query(ACCOUNT_LOOKUP_QUERY, user_id=command["user_id"], search_term=safe_term))
 
             if acct_df.empty:
                 client.chat_postMessage(
@@ -216,7 +219,7 @@ def register_slash_commands(app):
             sf_link = sf_account_url(account_id)
 
             # Get recent calls
-            calls_df = run_query(GONG_MEETINGS_QUERY.format(lookback_days=90))
+            calls_df = run_query(format_query(GONG_MEETINGS_QUERY, user_id=command["user_id"], lookback_days=90))
             acct_calls = calls_df[calls_df["account_id"] == account_id].head(3)
 
             calls_text = ""
@@ -235,7 +238,7 @@ def register_slash_commands(app):
             ) if acct_contacts else "No contacts found"
 
             # Get open opps
-            opps_df = run_query(ACCOUNT_OPPS_QUERY)
+            opps_df = run_query(format_query(ACCOUNT_OPPS_QUERY, user_id=command["user_id"]))
             acct_opps = opps_df[opps_df["account_id"] == account_id] if not opps_df.empty else pd.DataFrame()
             opps_text = "\n".join(
                 f"- {r['expansion_subtype']} ({r['opportunity_stage_name']}) — "
@@ -249,8 +252,8 @@ def register_slash_commands(app):
             treasury_l30 = format_currency(float(row.get("treasury_l30d", 0) or 0))
 
             # Email context (expanded — all Ramp employee emails)
-            email_ctx = get_email_context(account_id, account_name, days=30)
-            email_text = format_email_context_block(email_ctx)
+            email_ctx = get_email_context(account_id, account_name, days=30, user_id=command["user_id"])
+            email_text = format_email_context_block(email_ctx, user_id=command["user_id"])
 
             # Seasonal spend (12-month history for trend intelligence)
             seasonal_text = ""
@@ -281,7 +284,7 @@ def register_slash_commands(app):
             except Exception:
                 pass  # Non-critical — brief still works without seasonal data
 
-            prompt = f"""Generate a concise pre-call brief for {OWNER_NAME}'s meeting with {account_name}.
+            prompt = f"""Generate a concise pre-call brief for {user["sf_owner_name"]}'s meeting with {account_name}.
 
 ACCOUNT DATA:
 - L30D Card: {card_l30} | Bill Pay: {bp_l30} | Treasury: {treasury_l30}
@@ -297,7 +300,7 @@ KEY CONTACTS:
 RECENT CALLS:
 {calls_text if calls_text else 'No recent calls'}
 
-RECENT EMAIL ACTIVITY (all Ramp employees, not just Greg):
+RECENT EMAIL ACTIVITY (all Ramp employees, not just {user["first_name"]}):
 {email_text}
 
 Write a 200-word brief covering:
@@ -308,7 +311,7 @@ Write a 200-word brief covering:
 5. If there are pain point signals or unanswered emails, flag them as priority
 6. Specific ask or close to attempt on this call
 
-Be direct and specific. This is for Greg to glance at 2 minutes before the call."""
+Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes before the call."""
 
             brief = call_claude(prompt, max_tokens=800)
 
@@ -340,14 +343,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_pipeline_cleanup(ack, command, client, respond):
         """On-demand pipeline cleanup analysis."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running pipeline cleanup — this may take a minute...")
 
         def _run():
             try:
                 from jobs.pipeline_cleanup import run_pipeline_cleanup
-                run_pipeline_cleanup(client, force=True)
+                run_pipeline_cleanup(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("pipeline-cleanup command failed: %s", e)
                 client.chat_postMessage(
@@ -368,7 +372,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
             /post-meeting ondeck 7     — latest call for account in last 7 days
         """
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         text = command.get("text", "").strip()
 
@@ -397,11 +402,11 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
             try:
                 if account_filter:
                     # Account-specific: try Granola first, then Gong
-                    _handle_post_meeting_account(client, command["user_id"], account_filter, lookback_days)
+                    _handle_post_meeting_account(client, command["user_id"], account_filter, lookback_days, query_user_id=command["user_id"])
                 else:
                     # Try Granola first (last 60 min)
                     from jobs.granola_followup import run_granola_followup
-                    run_granola_followup(client, force=True)
+                    run_granola_followup(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("post-meeting command failed: %s", e)
                 client.chat_postMessage(
@@ -415,7 +420,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_opp_pacing(ack, command, client, respond):
         """On-demand opp pacing report. Accepts optional account name filter."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         account_name = command.get("text", "").strip() or None
 
@@ -427,7 +433,7 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
         def _run():
             try:
                 from jobs.opp_pacing import run_opp_pacing
-                run_opp_pacing(client, account_name=account_name, force=True)
+                run_opp_pacing(client, user_id=command["user_id"], account_name=account_name, force=True)
             except Exception as e:
                 logger.error("opp-pacing command failed: %s", e)
                 client.chat_postMessage(
@@ -441,14 +447,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_zero_to_one(ack, command, client, respond):
         """On-demand zero-to-one activation alert."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Checking zero-to-one activations — this may take a minute...")
 
         def _run():
             try:
                 from jobs.zero_to_one import run_zero_to_one
-                run_zero_to_one(client, force=True)
+                run_zero_to_one(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("zero-to-one command failed: %s", e)
                 client.chat_postMessage(
@@ -462,14 +469,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_forecast(ack, command, client, respond):
         """On-demand weekly forecast refresh."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running forecast — this may take a minute...")
 
         def _run():
             try:
                 from jobs.forecasting import run_forecasting
-                run_forecasting(client, force=True)
+                run_forecasting(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("forecast command failed: %s", e)
                 client.chat_postMessage(
@@ -485,14 +493,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_status(ack, command, client, respond):
         """Health check: connections, schedules, dedup state."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running status check...")
 
         def _run():
             try:
                 from jobs.status import run_status
-                run_status(client)
+                run_status(client, user_id=command["user_id"])
             except Exception as e:
                 logger.error("gary-status failed: %s", e)
                 client.chat_postMessage(
@@ -506,13 +515,14 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_help(ack, command, client, respond):
         """Full capability listing with examples."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
 
         def _run():
             try:
                 from jobs.status import run_help
-                run_help(client)
+                run_help(client, user_id=command["user_id"])
             except Exception as e:
                 logger.error("gary-help failed: %s", e)
                 client.chat_postMessage(
@@ -526,14 +536,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_gary_test(ack, command, client, respond):
         """Run all jobs in test mode to verify everything works."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Starting full test suite — this will take 1-2 minutes. Results coming via DM...")
 
         def _run():
             try:
                 from jobs.status import run_test
-                run_test(client)
+                run_test(client, user_id=command["user_id"])
             except Exception as e:
                 logger.error("gary-test failed: %s", e)
                 client.chat_postMessage(
@@ -547,14 +558,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_morning_brief(ack, command, client, respond):
         """On-demand morning brief — combined daily action summary."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Generating morning brief...")
 
         def _run():
             try:
                 from jobs.morning_brief import run_morning_brief
-                run_morning_brief(client, force=True)
+                run_morning_brief(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("morning-brief command failed: %s", e)
                 client.chat_postMessage(
@@ -568,14 +580,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_priorities(ack, command, client, respond):
         """Priority actions — the single ranked list of what to do now."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Building priority actions — this may take 30-60 seconds...")
 
         def _run():
             try:
                 from jobs.priority_actions import run_priority_actions
-                run_priority_actions(client, force=True)
+                run_priority_actions(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("priorities command failed: %s", e)
                 client.chat_postMessage(
@@ -591,14 +604,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_quota_heartbeat(ack, command, client, respond):
         """On-demand quota heartbeat — CP attainment + accelerator band."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running quota heartbeat...")
 
         def _run():
             try:
                 from jobs.quota_heartbeat import run_quota_heartbeat
-                run_quota_heartbeat(client)
+                run_quota_heartbeat(client, user_id=command["user_id"])
             except Exception as e:
                 logger.error("quota-heartbeat command failed: %s", e)
                 client.chat_postMessage(
@@ -612,14 +626,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_spend_pacing(ack, command, client, respond):
         """On-demand spend pacing — MTD vs last month, YoY, trajectory."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running spend pacing analysis...")
 
         def _run():
             try:
                 from jobs.spend_pacing import run_spend_pacing
-                run_spend_pacing(client, force=True)
+                run_spend_pacing(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("spend-pacing command failed: %s", e)
                 client.chat_postMessage(
@@ -633,14 +648,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_post_close(ack, command, client, respond):
         """On-demand post-close CP monitor — activation + baseline tracking."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running post-close CP monitor...")
 
         def _run():
             try:
                 from jobs.post_close_monitor import run_post_close_monitor
-                run_post_close_monitor(client, force=True)
+                run_post_close_monitor(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("post-close command failed: %s", e)
                 client.chat_postMessage(
@@ -654,14 +670,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_activity_report(ack, command, client, respond):
         """On-demand activity report — SQLs created + opps closed by product."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running activity report...")
 
         def _run():
             try:
                 from jobs.activity_report import run_activity_report
-                run_activity_report(client, force=True)
+                run_activity_report(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("activity-report command failed: %s", e)
                 client.chat_postMessage(
@@ -675,14 +692,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_top_accounts(ack, command, client, respond):
         """On-demand account tiering — Top 50 ranked by CP potential."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Running account tiering — this may take a minute...")
 
         def _run():
             try:
                 from jobs.account_tiering import run_account_tiering
-                run_account_tiering(client, force=True)
+                run_account_tiering(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("top-accounts command failed: %s", e)
                 client.chat_postMessage(
@@ -696,14 +714,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_batch_outreach(ack, command, client, respond):
         """On-demand batch outreach — cluster accounts + draft campaigns."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Building batch outreach campaigns...")
 
         def _run():
             try:
                 from jobs.batch_outreach import run_batch_outreach
-                run_batch_outreach(client, force=True)
+                run_batch_outreach(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("batch-outreach command failed: %s", e)
                 client.chat_postMessage(
@@ -717,14 +736,15 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_nudge(ack, command, client, respond):
         """On-demand proactive nudge — what's new + highest-value suggestions."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         respond("Checking for new signals...")
 
         def _run():
             try:
                 from jobs.proactive_nudge import run_proactive_nudge
-                run_proactive_nudge(client, force=True)
+                run_proactive_nudge(client, user_id=command["user_id"], force=True)
             except Exception as e:
                 logger.error("nudge command failed: %s", e)
                 client.chat_postMessage(
@@ -738,7 +758,8 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
     def handle_bill_drafter(ack, command, client, respond):
         """On-demand bill drafter sweep. Accepts optional lookback: 2h (default), 24h, 7d."""
         ack()
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
             return
         text = command.get("text", "").strip().lower()
 
@@ -767,7 +788,7 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
         def _run():
             try:
                 from handlers.channel_monitors import run_bill_drafter_sweep
-                processed = run_bill_drafter_sweep(client, lookback_hours=lookback_hours)
+                processed = run_bill_drafter_sweep(client, user_id=command["user_id"], lookback_hours=lookback_hours)
                 if processed == 0:
                     client.chat_postMessage(
                         channel=command["user_id"],
@@ -797,12 +818,9 @@ Be direct and specific. This is for Greg to glance at 2 minutes before the call.
           /opp ondeck card 50k | send contract | consolidating AP from 3 vendors
         """
         ack()
-        logger.info(
-            "/opp received — user=%s api_app_id=%s owner=%s is_owner=%s",
-            command.get("user_id"), command.get("api_app_id"),
-            get_owner_id(), _is_owner(command),
-        )
-        if not _is_owner(command):
+        user = _check_user(command, respond)
+        if not user:
+            logger.info("/opp rejected — user=%s not registered", command.get("user_id"))
             return
         text = command.get("text", "").strip()
         if not text:
@@ -984,7 +1002,7 @@ def _handle_opp_creation(text, user_id, client):
     spend_context = ""
     try:
         safe_name = account_name.replace("'", "''").replace("%", "\\%")
-        acct_df = run_query(ACCOUNT_LOOKUP_QUERY.format(search_term=safe_name))
+        acct_df = run_query(format_query(ACCOUNT_LOOKUP_QUERY, user_id=user_id, search_term=safe_name))
         if not acct_df.empty:
             row = acct_df.iloc[0]
             card = float(row.get("card_l30d", 0) or 0)
@@ -1001,7 +1019,7 @@ def _handle_opp_creation(text, user_id, client):
     # Check for existing open opps on this account
     existing_opps = ""
     try:
-        opps_df = run_query(ACCOUNT_OPPS_QUERY)
+        opps_df = run_query(format_query(ACCOUNT_OPPS_QUERY, user_id=user_id))
         if not opps_df.empty:
             acct_opps = opps_df[opps_df["account_id"] == account_id]
             if not acct_opps.empty:
@@ -1022,7 +1040,7 @@ def _handle_opp_creation(text, user_id, client):
 
     # If user didn't provide next_step or notes, run full Gong transcript analysis
     if not next_step or not user_notes:
-        gong_result = _extract_opp_context_from_gong(account_id, account_name, product_type)
+        gong_result = _extract_opp_context_from_gong(account_id, account_name, product_type, user_id=user_id)
         if gong_result:
             gong_source = gong_result.get("source", "")
             if not gong_link:
@@ -1225,7 +1243,7 @@ def _get_latest_gong_url(account_id, account_name=""):
     return ""
 
 
-def _extract_opp_context_from_gong(account_id, account_name, product_type):
+def _extract_opp_context_from_gong(account_id, account_name, product_type, user_id=None):
     """Check for recent Gong transcripts and extract next step + expansion notes.
 
     Returns {next_step, notes, source} or None if no transcript found.
@@ -1234,7 +1252,7 @@ def _extract_opp_context_from_gong(account_id, account_name, product_type):
     from queries.queries import GONG_FULL_TRANSCRIPT_QUERY
 
     try:
-        df = run_query(GONG_FULL_TRANSCRIPT_QUERY.format(
+        df = run_query(format_query(GONG_FULL_TRANSCRIPT_QUERY, user_id=user_id,
             account_id=account_id, lookback_days=30,
         ))
         if df.empty:
@@ -1326,7 +1344,7 @@ def _fuzzy_title_match(query: str, title: str) -> bool:
     return False
 
 
-def _handle_post_meeting_account(client, user_id, account_filter, lookback_days):
+def _handle_post_meeting_account(client, user_id, account_filter, lookback_days, query_user_id=None):
     """Run post-meeting analysis for a specific account.
 
     Tries Granola first (recent local meetings), then falls back to Gong transcripts in Snowflake.
@@ -1420,14 +1438,15 @@ def _handle_post_meeting_account(client, user_id, account_filter, lookback_days)
             )
 
     # -- Fall back to Gong ------------------------------------------------
+    _quid = query_user_id or user_id
     transcript_df = run_query(
-        GONG_MEETINGS_FULL_TRANSCRIPT_QUERY.format(lookback_days=lookback_days)
+        format_query(GONG_MEETINGS_FULL_TRANSCRIPT_QUERY, user_id=_quid, lookback_days=lookback_days)
     )
 
     if transcript_df.empty:
         # Try with longer lookback
         transcript_df = run_query(
-            GONG_MEETINGS_FULL_TRANSCRIPT_QUERY.format(lookback_days=30)
+            format_query(GONG_MEETINGS_FULL_TRANSCRIPT_QUERY, user_id=_quid, lookback_days=30)
         )
 
     if transcript_df.empty:

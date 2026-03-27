@@ -30,24 +30,44 @@ class DedupTracker:
 
     # ── public API ────────────────────────────────────────────────────────
 
-    def is_processed(self, key: str) -> bool:
-        """Return True if *key* was already processed within the TTL window."""
+    @staticmethod
+    def user_key(user_id: str | None, key: str) -> str:
+        """Prefix *key* with *user_id* for per-user dedup scoping.
+
+        If *user_id* is ``None`` the key is returned unchanged (backward
+        compatible with single-user mode).
+        """
+        if user_id:
+            return f"{user_id}:{key}"
+        return key
+
+    def is_processed(self, key: str, user_id: str | None = None) -> bool:
+        """Return True if *key* was already processed within the TTL window.
+
+        When *user_id* is supplied the key is automatically prefixed so
+        that different users have independent dedup state.
+        """
+        effective_key = self.user_key(user_id, key)
         with self._lock:
-            ts = self._state.get(key)
+            ts = self._state.get(effective_key)
             if ts is None:
                 return False
             age_days = (time.time() - ts) / 86400
             if age_days > DEDUP_TTL_DAYS:
                 # Expired — treat as not processed
-                del self._state[key]
+                del self._state[effective_key]
                 self._save()
                 return False
             return True
 
-    def mark_processed(self, key: str) -> None:
-        """Record *key* as processed with the current timestamp and persist."""
+    def mark_processed(self, key: str, user_id: str | None = None) -> None:
+        """Record *key* as processed with the current timestamp and persist.
+
+        When *user_id* is supplied the key is automatically prefixed.
+        """
+        effective_key = self.user_key(user_id, key)
         with self._lock:
-            self._state[key] = time.time()
+            self._state[effective_key] = time.time()
             self._save()
 
     # ── persistence helpers ───────────────────────────────────────────────

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from queries.queries import SIGNALS_QUERY
+from queries.queries import SIGNALS_QUERY, format_query
 from core.snowflake_client import run_query
 from core.slack_formatter import sf_account_url, format_currency, dashboard_url
 from config import GREG_SLACK_ID, NTR_RATES, SF_BASE_URL
@@ -242,7 +242,7 @@ def _build_blocks(date_str: str, with_opp: list[dict], missing_opp: list[dict]) 
     return blocks
 
 
-def run_zero_to_one(client, force: bool = False):
+def run_zero_to_one(client, user_id=None, force: bool = False):
     """Run zero-to-one activation alert and DM Greg.
 
     Parameters
@@ -252,8 +252,10 @@ def run_zero_to_one(client, force: bool = False):
     force : bool
         When True, send the report even if nothing found (slash command use).
     """
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
-        signals_df = run_query(SIGNALS_QUERY)
+        signals_df = run_query(format_query(SIGNALS_QUERY, user_id=user_id))
         if signals_df.empty:
             if force:
                 from core.slack_formatter import simple_dm_blocks
@@ -262,7 +264,7 @@ def run_zero_to_one(client, force: bool = False):
                     "\u2705 All clear \u2014 no new activations with open opps.",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Zero-to-One: all clear",
                 )
             else:
@@ -275,16 +277,16 @@ def run_zero_to_one(client, force: bool = False):
         new_with_opp = []
         for item in with_opp:
             dedup_key = f"zero_to_one_{item['account_id']}_{item['product']}"
-            if not tracker.is_processed(dedup_key):
+            if not tracker.is_processed(dedup_key, user_id=user_id):
                 new_with_opp.append(item)
-                tracker.mark_processed(dedup_key)
+                tracker.mark_processed(dedup_key, user_id=user_id)
 
         new_missing_opp = []
         for item in missing_opp:
             dedup_key = f"zero_to_one_missing_{item['account_id']}_{item['product']}"
-            if not tracker.is_processed(dedup_key):
+            if not tracker.is_processed(dedup_key, user_id=user_id):
                 new_missing_opp.append(item)
-                tracker.mark_processed(dedup_key)
+                tracker.mark_processed(dedup_key, user_id=user_id)
 
         # Skip if nothing new (unless forced)
         if not new_with_opp and not new_missing_opp and not force:
@@ -302,7 +304,7 @@ def run_zero_to_one(client, force: bool = False):
                 "\u2705 All clear \u2014 no new activations with open opps.",
             )
             client.chat_postMessage(
-                channel=GREG_SLACK_ID, blocks=blocks,
+                channel=dm_target, blocks=blocks,
                 text="Zero-to-One: all clear",
             )
             return
@@ -315,7 +317,7 @@ def run_zero_to_one(client, force: bool = False):
             f"{len(report_missing)} missing opps"
         )
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=fallback,
         )

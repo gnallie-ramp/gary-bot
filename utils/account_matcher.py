@@ -15,11 +15,9 @@ from datetime import datetime, timedelta
 
 from config import OWNER_NAME
 from core.snowflake_client import run_query
+from core.user_registry import get_all_users, get_user_sf_name
 
 logger = logging.getLogger(__name__)
-
-# Greg's SFDC user ID
-GREG_SFDC_USER_ID = "0056g000006oJIDAA2"
 
 # Recently closed opp window — don't suggest creating if one was CW'd within N days
 RECENTLY_CLOSED_DAYS = 90
@@ -211,6 +209,7 @@ def match_account(
     account_id: str = "",
     domain: str = "",
     participant_emails: list[str] | None = None,
+    user_id: str | None = None,
 ) -> MatchResult:
     """Match an account from meeting/alert context to SFDC.
 
@@ -229,7 +228,7 @@ def match_account(
             df = run_query(_ACCOUNT_BY_ID_QUERY.format(account_id=account_id))
             if not df.empty:
                 row = df.iloc[0]
-                _populate_result(result, row)
+                _populate_result(result, row, user_id=user_id)
             else:
                 result.warnings.append(f"Account ID {account_id} not found in growth universe.")
 
@@ -252,7 +251,7 @@ def match_account(
                     domain=search_domain or "NOMATCH",
                 ))
                 if not df.empty:
-                    _pick_best_match(result, df, account_name)
+                    _pick_best_match(result, df, account_name, user_id=user_id)
 
             # Pass 2b: Search account name by email domain slug
             # e.g., "americanaccordfood.com" → search for "americanaccordfood" in account names
@@ -263,7 +262,7 @@ def match_account(
                         domain_slug=domain_slug,
                     ))
                     if not df.empty:
-                        _pick_best_match(result, df, account_name)
+                        _pick_best_match(result, df, account_name, user_id=user_id)
                         if result.matched:
                             logger.info(
                                 "Matched account '%s' via email domain slug '%s'",
@@ -289,7 +288,7 @@ def match_account(
                         domain_slug=safe_combo,
                     ))
                     if not df.empty:
-                        _pick_best_match(result, df, account_name)
+                        _pick_best_match(result, df, account_name, user_id=user_id)
                         if result.matched:
                             logger.info(
                                 "Matched account '%s' via name fragment '%s'",
@@ -315,18 +314,19 @@ def match_account(
     return result
 
 
-def _pick_best_match(result: MatchResult, df, account_name: str = "") -> None:
+def _pick_best_match(result: MatchResult, df, account_name: str = "", user_id: str | None = None) -> None:
     """Pick the best row from a multi-row result set and populate the MatchResult.
 
     Priority order:
     1. Exact account name match
-    2. Greg's book + has open opps (strongest active-relationship signal)
-    3. Greg's book (no open opps)
+    2. User's book + has open opps (strongest active-relationship signal)
+    3. User's book (no open opps)
     4. First result (last resort)
     """
     best = None
-    greg_with_opps = None
-    greg_no_opps = None
+    user_sf_name = get_user_sf_name(user_id)
+    owner_with_opps = None
+    owner_no_opps = None
 
     for _, row in df.iterrows():
         name = (row.get("account_name") or "").lower()
@@ -338,17 +338,17 @@ def _pick_best_match(result: MatchResult, df, account_name: str = "") -> None:
             best = row
             break
 
-        # 2/3. Greg's accounts — prefer ones with open opps
-        if owner == OWNER_NAME:
-            if open_opps > 0 and greg_with_opps is None:
-                greg_with_opps = row
-            elif greg_no_opps is None:
-                greg_no_opps = row
+        # 2/3. User's accounts — prefer ones with open opps
+        if owner == user_sf_name:
+            if open_opps > 0 and owner_with_opps is None:
+                owner_with_opps = row
+            elif owner_no_opps is None:
+                owner_no_opps = row
 
     if best is None:
-        best = greg_with_opps or greg_no_opps or df.iloc[0]
+        best = owner_with_opps or owner_no_opps or df.iloc[0]
 
-    _populate_result(result, best)
+    _populate_result(result, best, user_id=user_id)
 
     # Warn about multiple matches
     if len(df) > 1:
@@ -375,16 +375,21 @@ def _name_fragments(words: list[str]) -> list[str]:
     return fragments
 
 
-def _populate_result(result: MatchResult, row) -> None:
+def _populate_result(result: MatchResult, row, user_id: str | None = None) -> None:
     """Populate a MatchResult from a Snowflake row."""
     result.matched = True
     result.account_id = str(row.get("account_id") or "")
     result.account_name = str(row.get("account_name") or "")
     result.owner_name = str(row.get("owner_name") or "")
-    result.owner_id = GREG_SFDC_USER_ID if result.owner_name == OWNER_NAME else ""
+    # Look up SFDC user ID from registry by matching owner name
+    result.owner_id = ""
+    for _uid, profile in get_all_users().items():
+        if profile.get("sf_owner_name") == result.owner_name:
+            result.owner_id = profile.get("sfdc_user_id", "")
+            break
     result.account_status = str(row.get("account_status") or "")
     result.segment = str(row.get("segment") or "")
-    result.is_gregs_book = result.owner_name == OWNER_NAME
+    result.is_gregs_book = result.owner_name == get_user_sf_name(user_id)
 
 
 def _fetch_opps(result: MatchResult) -> None:
@@ -413,6 +418,7 @@ def _fetch_opps(result: MatchResult) -> None:
 def validate_opp_action(
     match: MatchResult,
     suggested_product: str,
+    user_id: str | None = None,
 ) -> dict:
     """Determine the right opp action given the account match and product.
 
@@ -447,7 +453,7 @@ def validate_opp_action(
     if existing:
         # Check if opp is owned by Greg
         opp_owner = str(existing.get("owner_name") or "")
-        if opp_owner and opp_owner != OWNER_NAME:
+        if opp_owner and opp_owner != get_user_sf_name(user_id):
             warnings.append(
                 f"Existing {suggested_product} opp is owned by {opp_owner} "
                 f"(not you). Verify before updating."

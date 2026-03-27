@@ -31,73 +31,99 @@ _SEEN_CACHE_PATH = Path.home() / ".gary_bot_seen_signals.json"
 # Confirmation cache: signals must appear in 2+ consecutive runs before DM
 _PENDING_CACHE_PATH = Path.home() / ".gary_bot_pending_signals.json"
 
-# In-memory cache of already-notified signals: {(signal_type, account_id): timestamp}
-# Reset daily at the morning summary run. Persisted to disk between restarts.
-_seen_signals: dict[tuple[str, str], float] = {}
+# In-memory caches keyed by user_id.
+# Each value is a dict of {(signal_type, account_id): timestamp}.
+_seen_signals: dict[str, dict[tuple[str, str], float]] = {}
 
-# Pending signals awaiting confirmation: {(signal_type, account_id): first_seen_timestamp}
-# If a signal appears again on the next run, it is confirmed and DM'd.
-_pending_signals: dict[tuple[str, str], float] = {}
+# Pending signals awaiting confirmation, keyed by user_id.
+_pending_signals: dict[str, dict[tuple[str, str], float]] = {}
 
-# Track last daily summary date to know when to reset
-_last_daily_date: str = ""
+# Track last daily summary date per user_id.
+_last_daily_date: dict[str, str] = {}
+
+# Track which user caches have been loaded from disk.
+_loaded_users: set[str] = set()
 
 
-def _load_seen_cache():
-    """Load seen-signals cache from disk."""
-    global _seen_signals, _pending_signals, _last_daily_date
+def _ensure_user_cache(user_id: str) -> None:
+    """Lazy-load the cache for *user_id* from disk if not already loaded."""
+    if user_id in _loaded_users:
+        return
+    _loaded_users.add(user_id)
+    _seen_signals.setdefault(user_id, {})
+    _pending_signals.setdefault(user_id, {})
+    _last_daily_date.setdefault(user_id, "")
     try:
         if _SEEN_CACHE_PATH.exists():
-            data = json.loads(_SEEN_CACHE_PATH.read_text())
-            _last_daily_date = data.get("last_daily_date", "")
-            for entry in data.get("signals", []):
+            all_data = json.loads(_SEEN_CACHE_PATH.read_text())
+            user_data = all_data.get(user_id, {})
+            _last_daily_date[user_id] = user_data.get("last_daily_date", "")
+            for entry in user_data.get("signals", []):
                 key = (entry["signal_type"], entry["account_id"])
-                _seen_signals[key] = entry["timestamp"]
-            logger.info("Loaded %d seen signals from cache (date: %s)", len(_seen_signals), _last_daily_date)
+                _seen_signals[user_id][key] = entry["timestamp"]
+            logger.info(
+                "Loaded %d seen signals from cache for %s (date: %s)",
+                len(_seen_signals[user_id]), user_id, _last_daily_date[user_id],
+            )
     except Exception as e:
-        logger.warning("Failed to load seen-signals cache: %s", e)
+        logger.warning("Failed to load seen-signals cache for %s: %s", user_id, e)
     try:
         if _PENDING_CACHE_PATH.exists():
-            data = json.loads(_PENDING_CACHE_PATH.read_text())
-            for entry in data.get("pending", []):
+            all_data = json.loads(_PENDING_CACHE_PATH.read_text())
+            user_data = all_data.get(user_id, {})
+            for entry in user_data.get("pending", []):
                 key = (entry["signal_type"], entry["account_id"])
-                _pending_signals[key] = entry["timestamp"]
-            logger.info("Loaded %d pending signals from cache", len(_pending_signals))
+                _pending_signals[user_id][key] = entry["timestamp"]
+            logger.info(
+                "Loaded %d pending signals from cache for %s",
+                len(_pending_signals[user_id]), user_id,
+            )
     except Exception as e:
-        logger.warning("Failed to load pending-signals cache: %s", e)
+        logger.warning("Failed to load pending-signals cache for %s: %s", user_id, e)
 
 
 def _save_seen_cache():
-    """Persist seen-signals cache to disk."""
+    """Persist seen-signals cache to disk (all users)."""
     try:
-        data = {
-            "last_daily_date": _last_daily_date,
-            "signals": [
-                {"signal_type": k[0], "account_id": k[1], "timestamp": v}
-                for k, v in _seen_signals.items()
-            ],
-        }
-        _SEEN_CACHE_PATH.write_text(json.dumps(data, indent=2))
+        all_data: dict[str, dict] = {}
+        # Preserve existing data for users not currently in memory
+        if _SEEN_CACHE_PATH.exists():
+            try:
+                all_data = json.loads(_SEEN_CACHE_PATH.read_text())
+            except Exception:
+                pass
+        for uid in _loaded_users:
+            all_data[uid] = {
+                "last_daily_date": _last_daily_date.get(uid, ""),
+                "signals": [
+                    {"signal_type": k[0], "account_id": k[1], "timestamp": v}
+                    for k, v in _seen_signals.get(uid, {}).items()
+                ],
+            }
+        _SEEN_CACHE_PATH.write_text(json.dumps(all_data, indent=2))
     except Exception as e:
         logger.warning("Failed to save seen-signals cache: %s", e)
 
 
 def _save_pending_cache():
-    """Persist pending-signals cache to disk."""
+    """Persist pending-signals cache to disk (all users)."""
     try:
-        data = {
-            "pending": [
-                {"signal_type": k[0], "account_id": k[1], "timestamp": v}
-                for k, v in _pending_signals.items()
-            ],
-        }
-        _PENDING_CACHE_PATH.write_text(json.dumps(data, indent=2))
+        all_data: dict[str, dict] = {}
+        if _PENDING_CACHE_PATH.exists():
+            try:
+                all_data = json.loads(_PENDING_CACHE_PATH.read_text())
+            except Exception:
+                pass
+        for uid in _loaded_users:
+            all_data[uid] = {
+                "pending": [
+                    {"signal_type": k[0], "account_id": k[1], "timestamp": v}
+                    for k, v in _pending_signals.get(uid, {}).items()
+                ],
+            }
+        _PENDING_CACHE_PATH.write_text(json.dumps(all_data, indent=2))
     except Exception as e:
         logger.warning("Failed to save pending-signals cache: %s", e)
-
-
-# Load cache on module import
-_load_seen_cache()
 
 
 def _safe_int(v):
@@ -213,7 +239,7 @@ def _format_signal_entry(row, signal_type):
     return text, _draft_button(row, signal_type)
 
 
-def run_acceleration_alert(client, force: bool = False, daily: bool = False):
+def run_acceleration_alert(client, user_id=None, force: bool = False, daily: bool = False):
     """Query for acceleration signals and DM Greg with urgent NEW ones.
 
     Args:
@@ -221,13 +247,16 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
         force: Send even if no urgent signals
         daily: If True, this is the daily summary — reset seen cache and send all
     """
-    global _seen_signals, _last_daily_date
+    dm_target = user_id or GREG_SLACK_ID
+    cache_uid = dm_target
+
+    _ensure_user_cache(cache_uid)
 
     try:
         from core.snowflake_client import run_query
-        from queries.queries import HOME_PRIORITY_ALERTS_QUERY
+        from queries.queries import HOME_PRIORITY_ALERTS_QUERY, format_query
 
-        df = run_query(HOME_PRIORITY_ALERTS_QUERY)
+        df = run_query(format_query(HOME_PRIORITY_ALERTS_QUERY, user_id=user_id))
         if df.empty:
             logger.info("Acceleration alert: no data")
             return
@@ -236,10 +265,10 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
         today_str = now.strftime("%Y-%m-%d")
 
         # Reset seen + pending cache at the start of each day
-        if today_str != _last_daily_date:
-            _seen_signals = {}
-            _pending_signals = {}
-            _last_daily_date = today_str
+        if today_str != _last_daily_date.get(cache_uid, ""):
+            _seen_signals[cache_uid] = {}
+            _pending_signals[cache_uid] = {}
+            _last_daily_date[cache_uid] = today_str
             _save_seen_cache()
 
         # Filter to urgent signals only
@@ -250,17 +279,17 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
 
         if daily:
             # Daily summary: send all urgent signals
-            _send_daily_summary(client, urgent, now)
+            _send_daily_summary(client, urgent, now, dm_target=dm_target)
             # Mark all as seen
             for _, row in urgent.iterrows():
                 key = (row.get("signal_type", ""), row.get("account_id", ""))
-                _seen_signals[key] = now.timestamp()
+                _seen_signals[cache_uid][key] = now.timestamp()
             _save_seen_cache()
             return
 
         # Filter out muted signal types per user preferences
         from utils.settings import load_settings
-        user_settings = load_settings()
+        user_settings = load_settings(user_id)
         muted_signals = {
             sig for sig in _URGENT_SIGNALS
             if not user_settings.get(f"signal_{sig}", True)
@@ -276,33 +305,36 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
         confirmed_rows = []
         current_keys = set()
 
+        user_seen = _seen_signals[cache_uid]
+        user_pending = _pending_signals[cache_uid]
+
         for _, row in urgent.iterrows():
             key = (row.get("signal_type", ""), row.get("account_id", ""))
             current_keys.add(key)
 
-            if key in _seen_signals:
+            if key in user_seen:
                 continue  # already notified today
 
-            if key in _pending_signals:
+            if key in user_pending:
                 # Signal appeared before and is back — confirmed
                 confirmed_rows.append(row)
-                _seen_signals[key] = now_ts
-                _pending_signals.pop(key, None)
+                user_seen[key] = now_ts
+                user_pending.pop(key, None)
             else:
                 # First appearance — add to pending, don't DM yet
-                _pending_signals[key] = now_ts
+                user_pending[key] = now_ts
 
         # Prune pending signals that disappeared (no longer in query results)
-        stale_pending = [k for k in _pending_signals if k not in current_keys]
+        stale_pending = [k for k in user_pending if k not in current_keys]
         for k in stale_pending:
-            _pending_signals.pop(k, None)
+            user_pending.pop(k, None)
 
         _save_pending_cache()
         if confirmed_rows:
             _save_seen_cache()
 
         if not confirmed_rows and not force:
-            pending_count = len(_pending_signals)
+            pending_count = len(user_pending)
             if pending_count:
                 logger.info("Acceleration alert: %d signals pending confirmation", pending_count)
             else:
@@ -313,13 +345,13 @@ def run_acceleration_alert(client, force: bool = False, daily: bool = False):
             return
 
         # Send individual DMs for each confirmed signal
-        _send_realtime_alerts(client, confirmed_rows, now)
+        _send_realtime_alerts(client, confirmed_rows, now, dm_target=dm_target)
 
     except Exception as e:
         logger.error("Acceleration alert failed: %s", e)
 
 
-def _send_realtime_alerts(client, rows, now):
+def _send_realtime_alerts(client, rows, now, dm_target=None):
     """Send grouped DMs per signal type — max 3 shown, rest behind /priorities."""
     MAX_PER_TYPE = 3
 
@@ -370,7 +402,7 @@ def _send_realtime_alerts(client, rows, now):
                 fallback += f" +{overflow} more"
 
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 blocks=blocks,
                 text=fallback,
             )
@@ -383,7 +415,7 @@ def _send_realtime_alerts(client, rows, now):
             logger.error("Failed to send real-time alert for %s: %s", sig_type, e)
 
 
-def _send_daily_summary(client, urgent, now):
+def _send_daily_summary(client, urgent, now, dm_target=None):
     """Send the daily 8 AM ET summary with all urgent signals."""
     date_str = now.strftime("%A, %b %-d")
     blocks = [{
@@ -460,7 +492,7 @@ def _send_daily_summary(client, urgent, now):
 
     fallback = f"Acceleration Alert: {item_count} urgent signals, ~${total_cp:,} CP"
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text=fallback,
     )

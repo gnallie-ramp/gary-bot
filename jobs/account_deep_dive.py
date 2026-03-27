@@ -15,11 +15,12 @@ from core.slack_formatter import (
     sf_account_url, sf_opp_url, format_currency, dashboard_url,
     build_sf_new_opp_url, opp_fields_summary,
 )
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GMAIL_ADDRESS, GREG_SLACK_ID, NTR_RATES, OWNER_NAME
 from queries.queries import (
     ACCOUNT_LOOKUP_QUERY, ACCOUNT_NOTES_QUERY, ACCOUNT_EMAILS_FULL_QUERY,
-    GONG_MEETINGS_QUERY,
+    GONG_MEETINGS_QUERY, format_query,
 )
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +108,10 @@ LIMIT 20
 """
 
 
-def _resolve_account(search_term: str) -> dict | None:
+def _resolve_account(search_term: str, user_id: str = None) -> dict | None:
     """Resolve a search term to an account dict. Returns None if not found."""
     safe_term = search_term.replace("'", "''").replace("%", "\\%")
-    df = run_query(ACCOUNT_LOOKUP_QUERY.format(search_term=safe_term))
+    df = run_query(format_query(ACCOUNT_LOOKUP_QUERY, user_id=user_id, search_term=safe_term))
     if df.empty:
         return None
     row = df.iloc[0]
@@ -128,11 +129,17 @@ def _resolve_account(search_term: str) -> dict | None:
     }
 
 
-def _build_deep_dive_blocks(account: dict, opps_df, spend_df, gong_df, emails_df, notes_df) -> list[dict]:
+def _build_deep_dive_blocks(account: dict, opps_df, spend_df, gong_df, emails_df, notes_df, user_id: str = None) -> list[dict]:
     """Build comprehensive account deep dive blocks."""
+    from core.user_registry import get_user_email
+
     account_name = account["account_name"]
     account_id = account["account_id"]
     sf_link = sf_account_url(account_id)
+
+    # Derive the owner's email username for filtering (e.g. "gnallie" from "gnallie@ramp.com")
+    _owner_email = get_user_email(user_id) if user_id else (GMAIL_ADDRESS or "")
+    _owner_username = _owner_email.split("@")[0]
 
     blocks = [{
         "type": "header",
@@ -290,7 +297,7 @@ def _build_deep_dive_blocks(account: dict, opps_df, spend_df, gong_df, emails_df
             sender = str(em.get("sender_email", "") or "").split("@")[0]
             team = str(em.get("sender_team", "") or "")
             arrow = "\u2192" if direction == "Outbound" else "\u2190"
-            sender_tag = f" [{sender}]" if sender and sender != "gnallie" else ""
+            sender_tag = f" [{sender}]" if sender and sender != _owner_username else ""
             email_lines.append(f"  {arrow} {date}: {subject}{sender_tag}")
         # Signals summary
         signal_flags = []
@@ -304,7 +311,7 @@ def _build_deep_dive_blocks(account: dict, opps_df, spend_df, gong_df, emails_df
             signal_flags.append("willing to meet")
         # Unique senders
         senders = emails_df["sender_email"].dropna().unique() if "sender_email" in emails_df.columns else []
-        other_senders = [s for s in senders if "gnallie" not in str(s)]
+        other_senders = [s for s in senders if _owner_username not in str(s)]
         header = f"*Recent Emails* ({len(emails_df)} total"
         if other_senders:
             header += f", {len(other_senders) + 1} Ramp senders"
@@ -348,10 +355,10 @@ def _build_deep_dive_blocks(account: dict, opps_df, spend_df, gong_df, emails_df
     return blocks
 
 
-def run_account_deep_dive(search_term: str, client, dm_channel: str):
+def run_account_deep_dive(search_term: str, client, dm_channel: str, user_id: str = None):
     """Run the account deep dive and send results to the DM channel."""
     try:
-        account = _resolve_account(search_term)
+        account = _resolve_account(search_term, user_id=user_id)
         if not account:
             client.chat_postMessage(
                 channel=dm_channel,
@@ -366,7 +373,7 @@ def run_account_deep_dive(search_term: str, client, dm_channel: str):
         opps_df = spend_df = gong_df = emails_df = notes_df = None
 
         def _fetch_opps():
-            return run_query(_ACCOUNT_OPPS_QUERY.format(account_id=account_id, owner_name=OWNER_NAME))
+            return run_query(_ACCOUNT_OPPS_QUERY.format(account_id=account_id, owner_name=get_user_sf_name(user_id)))
 
         def _fetch_spend():
             if not business_id:
@@ -406,6 +413,7 @@ def run_account_deep_dive(search_term: str, client, dm_channel: str):
             results.get("gong"),
             results.get("emails"),
             results.get("notes"),
+            user_id=user_id,
         )
 
         client.chat_postMessage(

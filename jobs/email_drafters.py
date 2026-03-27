@@ -19,6 +19,7 @@ from templates.emails import (
     large_decline_case_a_email,
     large_decline_case_b_email,
     fundraise_email,
+    auto_card_loss_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,14 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _create_or_queue_draft(draft_id, to, subject, html_body, account_name, label, cc=""):
+def _create_or_queue_draft(draft_id, to, subject, html_body, account_name, label, cc="", user_id=None):
     """Create Gmail draft via Gumstack MCP, falling back to pending queue.
 
     Returns (method, success) tuple — method is 'gumstack' or 'queued'.
     """
     from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
     if gumstack_ok():
-        result = gumstack_create(to=to, subject=subject, html_body=html_body, cc=cc, label=label)
+        result = gumstack_create(to=to, subject=subject, html_body=html_body, cc=cc, label=label, user_id=user_id)
         if result["success"]:
             return "gumstack", True
         logger.warning("Gumstack draft failed for %s, falling back to queue", draft_id)
@@ -44,6 +45,7 @@ def _create_or_queue_draft(draft_id, to, subject, html_body, account_name, label
     save_pending_draft(
         draft_id=draft_id, to=to, cc=cc, subject=subject,
         html_body=html_body, account_name=account_name, label=label,
+        user_id=user_id or "",
     )
     return "queued", True
 
@@ -84,14 +86,15 @@ def _dedup_contacts(contacts):
     return result
 
 
-def _dm_greg(client, blocks):
-    """Send a DM to Greg."""
+def _dm_greg(client, blocks, user_id=None):
+    """Send a DM to the target user (defaults to Greg)."""
+    dm_target = user_id or GREG_SLACK_ID
     try:
         client.chat_postMessage(
-            channel=GREG_SLACK_ID, blocks=blocks, text="Draft notification"
+            channel=dm_target, blocks=blocks, text="Draft notification"
         )
     except Exception as e:
-        logger.error("Failed to DM Greg: %s", e)
+        logger.error("Failed to DM %s: %s", dm_target, e)
 
 
 def _extract_field(pattern, text, default=""):
@@ -167,7 +170,7 @@ def _format_natural_date(date_str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def handle_ach_to_card_alert(text, ts, client):
+def handle_ach_to_card_alert(text, ts, client, user_id=None):
     """Parse an ACH-to-card Slack alert and create a Gmail draft.
 
     Expected fields in the alert text:
@@ -280,6 +283,7 @@ def handle_ach_to_card_alert(text, ts, client):
             has_payment_portal=has_payment_portal,
             payment_portal_link=payment_portal_link,
             cashback_formatted=cashback_formatted,
+            user_id=user_id,
         )
 
         subject = "Quick Win: Earn Cash Back [URGENT]"
@@ -288,7 +292,7 @@ def handle_ach_to_card_alert(text, ts, client):
         draft_method, _ = _create_or_queue_draft(
             draft_id=draft_id, to=to_emails, subject=subject,
             html_body=html_body, account_name=vendor_name,
-            label="Claude Drafts/ACH to Card",
+            label="Claude Drafts/ACH to Card", user_id=user_id,
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
@@ -313,7 +317,7 @@ def handle_ach_to_card_alert(text, ts, client):
             details=details,
             draft_id=draft_id,
         )
-        _dm_greg(client, blocks)
+        _dm_greg(client, blocks, user_id=user_id)
 
         logger.info(
             "ACH-to-Card draft created (%s) — vendor=%s to=%s draft=%s",
@@ -330,6 +334,7 @@ def handle_ach_to_card_alert(text, ts, client):
                     account_name="ERROR",
                     details=f"Failed to create draft:\n```{e}```",
                 ),
+                user_id=user_id,
             )
         except Exception:
             logger.error("Could not DM Greg about ACH-to-Card failure")
@@ -340,7 +345,7 @@ def handle_ach_to_card_alert(text, ts, client):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def handle_procurement_trial_alert(text, ts, client):
+def handle_procurement_trial_alert(text, ts, client, user_id=None):
     """Parse a Procurement trial activation alert and create a Gmail draft."""
     try:
         # ── Extract fields ────────────────────────────────────────────────
@@ -374,14 +379,14 @@ def handle_procurement_trial_alert(text, ts, client):
         to_emails = ", ".join(c["email"] for c in contacts)
 
         # ── Build email ───────────────────────────────────────────────────
-        html_body = procurement_trial_email(greeting=greeting)
+        html_body = procurement_trial_email(greeting=greeting, user_id=user_id)
 
         subject = "Ramp Procurement Trial + AM intro"
         draft_id = f"procurement_{ts}"
         draft_method, _ = _create_or_queue_draft(
             draft_id=draft_id, to=to_emails, subject=subject,
             html_body=html_body, account_name=company_name,
-            label="Claude Drafts/Procurement Trials",
+            label="Claude Drafts/Procurement Trials", user_id=user_id,
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
@@ -398,7 +403,7 @@ def handle_procurement_trial_alert(text, ts, client):
             details=details,
             draft_id=draft_id,
         )
-        _dm_greg(client, blocks)
+        _dm_greg(client, blocks, user_id=user_id)
 
         logger.info(
             "Procurement Trial draft created — company=%s to=%s draft=%s",
@@ -417,6 +422,7 @@ def handle_procurement_trial_alert(text, ts, client):
                     account_name="ERROR",
                     details=f"Failed to create draft:\n```{e}```",
                 ),
+                user_id=user_id,
             )
         except Exception:
             logger.error("Could not DM Greg about Procurement Trial failure")
@@ -427,7 +433,7 @@ def handle_procurement_trial_alert(text, ts, client):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def handle_pclip_alert(text, ts, client):
+def handle_pclip_alert(text, ts, client, user_id=None):
     """Parse a PCLIP activation alert and create a Gmail draft.
 
     Skips drafting if the limit increase is less than $100,000.
@@ -470,6 +476,7 @@ def handle_pclip_alert(text, ts, client):
                         f"*New:* {_format_dollars(new_limit)}"
                     ),
                 ),
+                user_id=user_id,
             )
             return
 
@@ -506,14 +513,14 @@ def handle_pclip_alert(text, ts, client):
         new_limit_fmt = _format_dollars(new_limit)
 
         # ── Build email ───────────────────────────────────────────────────
-        html_body = pclip_email(first_name=first_name)
+        html_body = pclip_email(first_name=first_name, user_id=user_id)
 
         subject = "Ramp Limit Increase + AM intro"
         draft_id = f"pclip_{ts}"
         draft_method, _ = _create_or_queue_draft(
             draft_id=draft_id, to=to_emails, subject=subject,
             html_body=html_body, account_name=company_name,
-            label="Claude Drafts/PCLIP Activation",
+            label="Claude Drafts/PCLIP Activation", user_id=user_id,
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
@@ -531,7 +538,7 @@ def handle_pclip_alert(text, ts, client):
             details=details,
             draft_id=draft_id,
         )
-        _dm_greg(client, blocks)
+        _dm_greg(client, blocks, user_id=user_id)
 
         logger.info(
             "PCLIP draft created — company=%s increase=%s to=%s draft=%s",
@@ -548,6 +555,7 @@ def handle_pclip_alert(text, ts, client):
                     account_name="ERROR",
                     details=f"Failed to create draft:\n```{e}```",
                 ),
+                user_id=user_id,
             )
         except Exception:
             logger.error("Could not DM Greg about PCLIP failure")
@@ -562,7 +570,7 @@ _CASE_A_REASON = "AUTHORIZER_NON_AP_CARD_VELOCITY_LIMIT"
 _CASE_B_REASON = "OPEN_TO_BUY_LIMIT"
 
 
-def handle_large_decline_alert(text, ts, client):
+def handle_large_decline_alert(text, ts, client, user_id=None):
     """Parse a large-decline Slack alert and create a Gmail draft.
 
     Routing logic:
@@ -634,6 +642,7 @@ def handle_large_decline_alert(text, ts, client):
                             f"*Reason:* {decline_reason}"
                         ),
                     ),
+                    user_id=user_id,
                 )
                 return
             case = "B"
@@ -653,6 +662,7 @@ def handle_large_decline_alert(text, ts, client):
                         f"*Amount:* {amount_formatted}  |  *Vendor:* {vendor_name}"
                     ),
                 ),
+                user_id=user_id,
             )
             return
 
@@ -683,6 +693,7 @@ def handle_large_decline_alert(text, ts, client):
                 first_name=first_name,
                 vendor_name=vendor_name,
                 amount_formatted=amount_formatted,
+                user_id=user_id,
             )
             subject = f"Declined transaction \u2014 {vendor_name} ({amount_formatted})"
         else:
@@ -691,6 +702,7 @@ def handle_large_decline_alert(text, ts, client):
                 vendor_name=vendor_name,
                 amount_formatted=amount_formatted,
                 available_limit_formatted=avail_limit_formatted,
+                user_id=user_id,
             )
             subject = "Declined transaction \u2014 potential limit increase"
 
@@ -698,7 +710,7 @@ def handle_large_decline_alert(text, ts, client):
         draft_method, _ = _create_or_queue_draft(
             draft_id=draft_id, to=to_emails, subject=subject,
             html_body=html_body, account_name=vendor_name,
-            label="Claude Drafts/Large Declines",
+            label="Claude Drafts/Large Declines", user_id=user_id,
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
@@ -717,7 +729,7 @@ def handle_large_decline_alert(text, ts, client):
             details=details,
             draft_id=draft_id,
         )
-        _dm_greg(client, blocks)
+        _dm_greg(client, blocks, user_id=user_id)
 
         logger.info(
             "Large Decline (Case %s) draft created — vendor=%s amount=%s to=%s draft=%s",
@@ -734,6 +746,7 @@ def handle_large_decline_alert(text, ts, client):
                     account_name="ERROR",
                     details=f"Failed to create draft:\n```{e}```",
                 ),
+                user_id=user_id,
             )
         except Exception:
             logger.error("Could not DM Greg about Large Decline failure")
@@ -744,7 +757,7 @@ def handle_large_decline_alert(text, ts, client):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def handle_fundraise_alert(text, ts, client):
+def handle_fundraise_alert(text, ts, client, user_id=None):
     """Parse a fundraise Slack alert and create a Gmail draft.
 
     Expected fields in the alert text:
@@ -803,11 +816,12 @@ def handle_fundraise_alert(text, ts, client):
                         f"/r/Account/{account_id}/view|View Account>"
                     ),
                 ),
+                user_id=user_id,
             )
             return
 
         # ── Build email ───────────────────────────────────────────────────
-        html_body = fundraise_email(first_name=first_name or "there")
+        html_body = fundraise_email(first_name=first_name or "there", user_id=user_id)
 
         amount_display = f"${funding_amount}" if funding_amount else "undisclosed"
         subject = "Re: Fundraise + AM intro"
@@ -816,7 +830,7 @@ def handle_fundraise_alert(text, ts, client):
         draft_method, _ = _create_or_queue_draft(
             draft_id=draft_id, to=contact_email, subject=subject,
             html_body=html_body, account_name=company_name,
-            label="Claude Drafts/Fundraise",
+            label="Claude Drafts/Fundraise", user_id=user_id,
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
@@ -833,7 +847,7 @@ def handle_fundraise_alert(text, ts, client):
             details=details,
             draft_id=draft_id,
         )
-        _dm_greg(client, blocks)
+        _dm_greg(client, blocks, user_id=user_id)
 
         logger.info(
             "Fundraise draft created (%s) — company=%s to=%s draft=%s",
@@ -850,6 +864,125 @@ def handle_fundraise_alert(text, ts, client):
                     account_name="ERROR",
                     details=f"Failed to create draft:\n```{e}```",
                 ),
+                user_id=user_id,
             )
         except Exception:
             logger.error("Could not DM Greg about Fundraise failure")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. Automatic Card Loss
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def handle_auto_card_alert(text, ts, client, user_id=None):
+    """Parse a bill-pay-automatic-card-losses alert and create a Gmail draft.
+
+    Expected fields in the alert text:
+        Vendor, Current Bill Amount (Cashback Estimate), Due Date,
+        Payment Scheduled For, Account Manager, Bill Creator,
+        Business Owner, View Bill
+    """
+    try:
+        # ── Extract fields ────────────────────────────────────────────────
+        clean = re.sub(r'\*([A-Za-z ]+(?:\(s\))?):?\*', r'\1:', text)
+
+        vendor_name = _extract_field(r'Vendor:\s*(.+)', clean, "Unknown Vendor").strip()
+
+        # Cashback Estimate: "167.88 USD"
+        cashback_estimate = _extract_field(
+            r'Cashback(?:\s*Estimate)?\*?:\s*([\d,]+(?:\.\d+)?)', clean, "0"
+        )
+
+        # Bill Creator — "Name (<mailto:email|email>)" or "Name, email"
+        bill_creator_block = _extract_field(r'Bill Creator\*?:\s*(.+)', clean, "")
+        bill_creator = _extract_name_email(bill_creator_block)
+
+        # Business Owner
+        biz_owner_block = _extract_field(r'Business Owner:\s*(.+)', clean, "")
+        biz_owner = _extract_name_email(biz_owner_block)
+
+        # View Bill link — <URL|View Bill> format
+        view_bill_link = ""
+        vb_match = re.search(r'<(https?://[^|>]+)\|View Bill>', text)
+        if vb_match:
+            view_bill_link = vb_match.group(1)
+        if not view_bill_link:
+            view_bill_raw = _extract_field(r'View Bill:\s*(.+)', clean, "")
+            view_bill_link = _strip_slack_url(view_bill_raw) if view_bill_raw else ""
+
+        # ── Build recipients ──────────────────────────────────────────────
+        # To: business owner, CC: bill creator
+        to_email = biz_owner.get("email", "")
+        cc_email = bill_creator.get("email", "")
+        first_name = biz_owner.get("first_name", "")
+
+        if not to_email and cc_email:
+            # Fallback: if no biz owner, send to bill creator
+            to_email = cc_email
+            cc_email = ""
+            first_name = bill_creator.get("first_name", "")
+
+        if not to_email:
+            logger.warning(
+                "Auto Card alert (ts=%s): no recipients found, skipping", ts
+            )
+            return
+
+        # ── Build email ───────────────────────────────────────────────────
+        html_body = auto_card_loss_email(
+            first_name=first_name,
+            vendor_name=vendor_name,
+            estimated_cashback=cashback_estimate,
+            view_bill_link=view_bill_link or "https://app.ramp.com/bills",
+            user_id=user_id,
+        )
+
+        subject = f"Quick win on {vendor_name}: cashback available on this invoice"
+
+        draft_id = f"autocard_{ts}"
+        draft_method, _ = _create_or_queue_draft(
+            draft_id=draft_id, to=to_email, subject=subject,
+            html_body=html_body, account_name=vendor_name,
+            label="Claude Drafts/Automatic Card", cc=cc_email,
+            user_id=user_id,
+        )
+
+        # ── DM user ───────────────────────────────────────────────────────
+        details = (
+            f"*To:* {to_email}\n"
+            f"*CC:* {cc_email}\n"
+            f"*Subject:* {subject}\n"
+            f"*Vendor:* {vendor_name}\n"
+            f"*Est. Cashback:* ${cashback_estimate}"
+        )
+        if view_bill_link:
+            details += f"\n<{view_bill_link}|View Bill>"
+
+        blocks = drafter_confirmation_blocks(
+            drafter_type="Automatic Card",
+            account_name=vendor_name,
+            details=details,
+            draft_id=draft_id,
+        )
+        _dm_greg(client, blocks, user_id=user_id)
+
+        logger.info(
+            "Auto Card draft created (%s) — vendor=%s to=%s cc=%s draft=%s",
+            draft_method, vendor_name, to_email, cc_email, draft_id,
+        )
+
+    except Exception as e:
+        logger.exception("Error handling Auto Card alert (ts=%s): %s", ts, e)
+        try:
+            _dm_greg(
+                client,
+                drafter_confirmation_blocks(
+                    drafter_type="Automatic Card",
+                    account_name="ERROR",
+                    details=f"Failed to create draft:\n```{e}```",
+                ),
+                user_id=user_id,
+            )
+        except Exception:
+            logger.error("Could not DM about Auto Card failure")

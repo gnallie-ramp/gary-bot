@@ -113,18 +113,21 @@ def _start_scheduler():
     from jobs.post_meeting_followup import run_post_meeting_followup
     from jobs.granola_followup import run_granola_followup
     from jobs.acceleration_alert import run_acceleration_alert
-    from handlers.channel_monitors import run_bill_drafter_sweep
+    from handlers.channel_monitors import run_bill_drafter_sweep, run_auto_card_sweep
     # from jobs.auth_alert import run_auth_alert  # DISABLED
     from jobs.draft_reminder import run_draft_reminder
     from jobs.quota_insights import run_quota_insights
 
-    # Wrapper to pass Slack client
+    # Wrapper to pass Slack client — loops over all registered users
     def _wrap(fn, **kwargs):
         def _job():
-            try:
-                fn(app.client, **kwargs)
-            except Exception as e:
-                logger.error("Scheduled job %s failed: %s", fn.__name__, e)
+            from core.user_registry import get_all_users
+            users = get_all_users()
+            for uid in users:
+                try:
+                    fn(app.client, user_id=uid, **kwargs)
+                except Exception as e:
+                    logger.error("Job %s failed for user %s: %s", fn.__name__, uid, e)
         return _job
 
     # NOTE: Stale opp drafter disabled — email drafting handled by cowork.
@@ -250,6 +253,14 @@ def _start_scheduler():
         name="Bill Drafter Sweep",
     )
 
+    # Auto card loss sweep: Every 30 min, weekdays 8AM-6PM PT
+    scheduler.add_job(
+        _wrap(run_auto_card_sweep),
+        CronTrigger(day_of_week="mon-fri", hour="8-18", minute="0,30"),
+        id="auto_card_sweep",
+        name="Auto Card Sweep",
+    )
+
     # Pre-meeting auto-brief: Every 30 min, weekdays 7AM-6PM PT
     # Checks calendar for meetings in the next 90 min and sends prep
     scheduler.add_job(
@@ -298,12 +309,17 @@ def _start_scheduler():
     def _auto_flush_drafts():
         try:
             from utils.pending_drafts import flush_to_gmail, list_pending
+            from core.user_registry import get_all_users
             pending = list_pending()
             if not pending:
                 return
-            succeeded, failed = flush_to_gmail()
-            if succeeded or failed:
-                logger.info("Auto-flush: %d succeeded, %d failed", succeeded, failed)
+            for uid in get_all_users():
+                try:
+                    succeeded, failed = flush_to_gmail(user_id=uid)
+                    if succeeded or failed:
+                        logger.info("Auto-flush for %s: %d succeeded, %d failed", uid, succeeded, failed)
+                except Exception as e:
+                    logger.warning("Auto-flush drafts failed for %s: %s", uid, e)
         except Exception as e:
             logger.warning("Auto-flush drafts failed: %s", e)
 
@@ -377,13 +393,17 @@ def _run_catchup_jobs():
     hour = now_pt.hour
     is_workday = now_pt.weekday() < 5
 
+    from core.user_registry import get_all_users
+    all_users = get_all_users()
+
     def _safe_run(name, fn, *args, **kwargs):
-        """Run a catch-up job with error handling."""
-        try:
-            fn(*args, **kwargs)
-            logger.info("Catch-up: %s completed", name)
-        except Exception as e:
-            logger.warning("Catch-up: %s failed: %s", name, e)
+        """Run a catch-up job for all registered users with error handling."""
+        for uid in all_users:
+            try:
+                fn(*args, user_id=uid, **kwargs)
+                logger.info("Catch-up: %s completed for %s", name, uid)
+            except Exception as e:
+                logger.warning("Catch-up: %s failed for %s: %s", name, uid, e)
 
     try:
         # Always populate priority_actions cache on restart
@@ -394,10 +414,14 @@ def _run_catchup_jobs():
         if gap_hours >= 1.0:
             try:
                 from jobs.catchup_report import run_catchup_report
-                run_catchup_report(app.client, gap_hours)
-                logger.info("Catch-up: catch-up report sent")
+                for uid in all_users:
+                    try:
+                        run_catchup_report(app.client, gap_hours, user_id=uid)
+                        logger.info("Catch-up: catch-up report sent for %s", uid)
+                    except Exception as e:
+                        logger.warning("Catch-up: catch-up report failed for %s: %s", uid, e)
             except Exception as e:
-                logger.warning("Catch-up: catch-up report failed: %s", e)
+                logger.warning("Catch-up: catch-up report import failed: %s", e)
 
         # If we missed the morning window and it's still morning, send the brief
         if gap_hours >= 1.0 and 7 <= hour <= 11:
@@ -423,10 +447,14 @@ def _run_catchup_jobs():
                 from jobs.granola_followup import run_granola_followup
                 # Lookback covers the full offline gap + 30 min buffer
                 lookback_minutes = int(gap_hours * 60) + 30
-                run_granola_followup(app.client, lookback_minutes=lookback_minutes)
-                logger.info("Catch-up: granola_followup completed (lookback=%dm)", lookback_minutes)
+                for uid in all_users:
+                    try:
+                        run_granola_followup(app.client, user_id=uid, lookback_minutes=lookback_minutes)
+                        logger.info("Catch-up: granola_followup completed for %s (lookback=%dm)", uid, lookback_minutes)
+                    except Exception as e:
+                        logger.warning("Catch-up: granola_followup failed for %s: %s", uid, e)
             except Exception as e:
-                logger.warning("Catch-up: granola_followup failed: %s", e)
+                logger.warning("Catch-up: granola_followup import failed: %s", e)
 
         # Gong: check for transcripts that arrived during offline window
         if gap_hours >= 1.0 and is_workday:
@@ -558,7 +586,9 @@ def main():
     # Send startup heartbeat DM
     try:
         from jobs.status import run_status
-        run_status(app.client, force=True)
+        from core.user_registry import get_all_users
+        for uid in get_all_users():
+            run_status(app.client, user_id=uid, force=True)
         logger.info("Startup heartbeat sent")
     except Exception as e:
         logger.warning("Startup heartbeat failed: %s", e)

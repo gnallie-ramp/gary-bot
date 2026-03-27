@@ -26,17 +26,19 @@ def _check_snowflake() -> tuple[bool, str]:
         return False, f"FAILED: {e}"
 
 
-def _check_gmail() -> tuple[bool, str]:
-    """Test Gmail API connectivity."""
+def _check_gmail(user_id: str | None = None) -> tuple[bool, str]:
+    """Test Gmail connectivity via Gumstack MCP."""
     try:
-        from core.gmail_client import check_connection, check_imap_connection
-        api_ok, api_msg = check_imap_connection()
+        from core.gumstack_gmail import read_emails, is_available
 
-        if api_ok:
-            return True, f"Gmail API OK ({api_msg})"
-        return False, f"Gmail API: {api_msg}"
+        if not is_available(user_id=user_id):
+            return False, "Gumstack Gmail tokens not found"
+
+        results = read_emails("in:inbox", max_results=1, user_id=user_id)
+        # If we get here without exception, the connection is healthy
+        return True, f"Gumstack Gmail OK ({len(results)} test result(s))"
     except ImportError:
-        return False, "gmail_client not available"
+        return False, "gumstack_gmail not available"
     except Exception as e:
         return False, f"FAILED: {e}"
 
@@ -55,14 +57,16 @@ def _dedup_stats() -> str:
         return "unknown"
 
 
-def run_status(client, force: bool = False):
+def run_status(client, user_id=None, force: bool = False):
     """Post a status/health-check DM to Greg."""
+    dm_target = user_id or GREG_SLACK_ID
+
     now = datetime.now()
     date_str = now.strftime("%b %d, %Y %I:%M %p")
 
     # Connection checks
     sf_ok, sf_msg = _check_snowflake()
-    gmail_ok, gmail_msg = _check_gmail()
+    gmail_ok, gmail_msg = _check_gmail(user_id=dm_target)
     dedup_msg = _dedup_stats()
 
     # Scheduled jobs info
@@ -123,15 +127,17 @@ def run_status(client, force: bool = False):
 
     blocks = simple_dm_blocks("Gary Bot Status", "\n".join(lines))
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text="Gary Bot status check",
     )
     logger.info("Status check sent")
 
 
-def run_help(client):
+def run_help(client, user_id=None):
     """Post a comprehensive help/capability message."""
+    dm_target = user_id or GREG_SLACK_ID
+
     lines = [
         "*Everything I can do:*\n",
         "*\U0001f50d Account Intelligence*",
@@ -179,16 +185,18 @@ def run_help(client):
 
     blocks = simple_dm_blocks("Gary Bot — Full Capabilities", "\n".join(lines))
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text="Gary Bot capabilities",
     )
 
 
-def run_test(client):
+def run_test(client, user_id=None):
     """Run all jobs in test/force mode and report results."""
+    dm_target = user_id or GREG_SLACK_ID
+
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         text="\U0001f9ea *Running full test suite...*\nThis will take 1-2 minutes.",
     )
 
@@ -199,7 +207,7 @@ def run_test(client):
     results.append(("\u2705" if sf_ok else "\u274c", "Snowflake", sf_msg))
 
     # Test Gmail
-    gmail_ok, gmail_msg = _check_gmail()
+    gmail_ok, gmail_msg = _check_gmail(user_id=dm_target)
     results.append(("\u2705" if gmail_ok else "\u26a0\ufe0f", "Gmail", gmail_msg))
 
     # Test each job
@@ -218,9 +226,9 @@ def run_test(client):
             mod = importlib.import_module(module_name)
             func = getattr(mod, func_name)
             if func_name == "run_post_meeting":
-                func(client, lookback_days=2, force=True)
+                func(client, user_id=dm_target, lookback_days=2, force=True)
             else:
-                func(client, force=True)
+                func(client, user_id=dm_target, force=True)
             results.append(("\u2705", name, "Ran successfully"))
         except Exception as e:
             results.append(("\u274c", name, f"FAILED: {e}"))
@@ -235,7 +243,7 @@ def run_test(client):
 
     blocks = simple_dm_blocks("Gary Bot Test Results", "\n".join(lines))
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text=f"Gary Bot test: {passed}/{total} passed",
     )

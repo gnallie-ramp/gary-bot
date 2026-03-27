@@ -67,6 +67,7 @@ def save_draft(
     account_name: str = "",
     meeting_id: str = "",
     label: str = "",
+    user_id: str = "",
 ) -> str:
     """Persist a pending email draft.  Returns the draft_id."""
     entry = {
@@ -78,6 +79,7 @@ def save_draft(
         "account_name": account_name,
         "meeting_id": meeting_id,
         "label": label,
+        "user_id": user_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
@@ -101,11 +103,17 @@ def get_draft(draft_id: str) -> dict | None:
     return None
 
 
-def list_pending() -> list[dict]:
-    """Return all drafts with status 'pending'."""
+def list_pending(user_id: str | None = None) -> list[dict]:
+    """Return all drafts with status 'pending'.
+
+    If *user_id* is provided, only return drafts belonging to that user.
+    """
     with _lock:
         drafts = _load()
-    return [d for d in drafts if d.get("status") == "pending"]
+    pending = [d for d in drafts if d.get("status") == "pending"]
+    if user_id:
+        pending = [d for d in pending if d.get("user_id") == user_id]
+    return pending
 
 
 def mark_sent(draft_id: str) -> None:
@@ -120,9 +128,10 @@ def mark_sent(draft_id: str) -> None:
     logger.info("Marked draft %s as sent.", draft_id)
 
 
-def flush_to_gmail() -> tuple[int, int]:
-    """Retry all pending drafts via Gumstack Gmail MCP.
+def flush_to_gmail(user_id: str | None = None) -> tuple[int, int]:
+    """Retry pending drafts via Gumstack Gmail MCP.
 
+    If *user_id* is provided, only flush that user's drafts.
     Returns (succeeded, failed) counts.
     """
     from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
@@ -131,7 +140,7 @@ def flush_to_gmail() -> tuple[int, int]:
         logger.warning("Gumstack Gmail not available — cannot flush pending drafts")
         return 0, 0
 
-    pending = list_pending()
+    pending = list_pending(user_id=user_id)
     if not pending:
         return 0, 0
 
@@ -145,6 +154,7 @@ def flush_to_gmail() -> tuple[int, int]:
                 html_body=draft["html_body"],
                 cc=draft.get("cc", ""),
                 label=draft.get("label", ""),
+                user_id=draft.get("user_id") or None,
             )
             if result["success"]:
                 mark_sent(draft["draft_id"])

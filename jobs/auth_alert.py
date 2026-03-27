@@ -17,21 +17,25 @@ logger = logging.getLogger(__name__)
 # Don't re-alert within this window (seconds)
 _ALERT_COOLDOWN = 2 * 3600  # 2 hours
 
-# {connector: last_alerted_timestamp}
-_last_alerted: dict[str, float] = {}
+# {(user_id, connector): last_alerted_timestamp}
+_last_alerted: dict[tuple[str, str], float] = {}
 
 
-def run_auth_alert(client) -> None:
-    """Run health checks and DM Greg about any expired connectors.
+def run_auth_alert(client, user_id=None) -> None:
+    """Run health checks and DM the user about any expired connectors.
 
     Parameters
     ----------
     client : slack_sdk.web.WebClient
         Slack WebClient for sending DMs.
+    user_id : str, optional
+        Slack user ID to DM. Defaults to GREG_SLACK_ID.
     """
     # ── Run direct checks ─────────────────────────────────────────────
     logger.info("Running auth health checks...")
-    health.check_gmail_health()
+    dm_target = user_id or GREG_SLACK_ID
+    health.check_gmail_health(user_id=dm_target)
+    health.check_sf_health()
     health.check_snowflake_health()
 
     # ── Check for expired connectors ──────────────────────────────────
@@ -43,9 +47,10 @@ def run_auth_alert(client) -> None:
 
     # Filter out recently-alerted connectors
     now = time.time()
+    dm_target = user_id or GREG_SLACK_ID
     needs_alert = [
         c for c in expired
-        if now - _last_alerted.get(c, 0) > _ALERT_COOLDOWN
+        if now - _last_alerted.get((dm_target, c), 0) > _ALERT_COOLDOWN
     ]
 
     if not needs_alert:
@@ -61,12 +66,12 @@ def run_auth_alert(client) -> None:
 
     try:
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id or GREG_SLACK_ID,
             text=message,
         )
         # Mark all alerted connectors
         for c in needs_alert:
-            _last_alerted[c] = now
-        logger.info("Auth alert sent to Greg for: %s", needs_alert)
+            _last_alerted[(dm_target, c)] = now
+        logger.info("Auth alert sent to %s for: %s", user_id or GREG_SLACK_ID, needs_alert)
     except Exception as exc:
         logger.error("Failed to send auth alert DM: %s", exc)

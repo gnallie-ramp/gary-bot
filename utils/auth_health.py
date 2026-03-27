@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 AUTH_STATUS_FILE = os.path.expanduser("~/.gary_bot_auth_status.json")
 
-CONNECTORS = ["gmail", "snowflake"]
+CONNECTORS = ["gmail", "salesforce", "snowflake"]
 
 _DEFAULT_ENTRY = {
     "status": "unknown",
@@ -90,37 +90,66 @@ class AuthHealth:
 
     def format_status_dm(self) -> str:
         """Return a Slack-formatted string showing all connector statuses."""
+        _LABELS = {
+            "gmail": "Gmail (Gumstack)",
+            "salesforce": "Salesforce (sf CLI)",
+            "snowflake": "Snowflake",
+        }
+        _REAUTH_HINTS = {
+            "gmail": "Re-auth at <https://www.gumloop.com/personal/apps|gumloop.com/personal/apps>",
+            "salesforce": "Run in terminal: `sf org login web --alias ramp`",
+        }
         lines = []
         for name in CONNECTORS:
             entry = self._state.get(name, _DEFAULT_ENTRY)
             status = entry["status"]
             emoji = _STATUS_EMOJI.get(status, "\u2753")
-            label = name.capitalize()
-            if name == "gmail":
-                label = "Gmail (IMAP)"
+            label = _LABELS.get(name, name.capitalize())
             status_text = status.upper()
+            line = f"\u2022 {label}: {emoji} {status_text}"
             if entry["error"]:
-                lines.append(f"\u2022 {label}: {emoji} {status_text} \u2014 {entry['error']}")
-            else:
-                lines.append(f"\u2022 {label}: {emoji} {status_text}")
+                line += f" \u2014 {entry['error']}"
+            if status == "expired" and name in _REAUTH_HINTS:
+                line += f"\n   _\u2192 {_REAUTH_HINTS[name]}_"
+            lines.append(line)
         return "\n".join(lines)
 
     # ── direct health checks ─────────────────────────────────────────────
 
-    def check_gmail_health(self) -> bool:
-        """Test Gmail IMAP connectivity and update status.  Returns True if ok."""
+    def check_gmail_health(self, user_id: str | None = None) -> bool:
+        """Test Gmail connectivity via Gumstack MCP and update status.  Returns True if ok."""
         try:
-            from core.gmail_client import check_imap_connection
+            from core.gumstack_gmail import read_emails, is_available
 
-            ok, msg = check_imap_connection()
-            if ok:
-                self.update_status("gmail", "ok")
-            else:
-                self.update_status("gmail", "expired", error=msg)
-            return ok
+            if not is_available(user_id=user_id):
+                self.update_status("gmail", "expired", error="Gumstack Gmail tokens not found")
+                return False
+
+            read_emails("in:inbox", max_results=1, user_id=user_id)
+            self.update_status("gmail", "ok")
+            return True
         except Exception as exc:
             self.update_status("gmail", "expired", error=str(exc))
             logger.error("Gmail health check failed: %s", exc)
+            return False
+
+    def check_sf_health(self) -> bool:
+        """Test Salesforce sf CLI connectivity and update status. Returns True if ok."""
+        try:
+            from core.salesforce_client import ensure_auth
+
+            if ensure_auth():
+                self.update_status("salesforce", "ok")
+                return True
+            else:
+                self.update_status(
+                    "salesforce", "expired",
+                    error="SSO session expired — run: sf org login web --alias ramp",
+                )
+                return False
+        except Exception as exc:
+            self.update_status("salesforce", "expired", error=str(exc))
+            logger.error("Salesforce health check failed: %s", exc)
             return False
 
     def check_snowflake_health(self) -> bool:
@@ -168,3 +197,52 @@ class AuthHealth:
 
 # ── module-level singleton ────────────────────────────────────────────────
 health = AuthHealth()
+
+
+# ── Inline failure alert ──────────────────────────────────────────────────
+# Call this from any client when an operation fails due to auth.
+# Sends an immediate DM with re-auth instructions (rate-limited to 1 per 10 min
+# per connector to avoid spam during bulk failures).
+
+_inline_alert_ts: dict[tuple[str, str], float] = {}
+_INLINE_COOLDOWN = 600  # 10 minutes
+
+_REAUTH_INSTRUCTIONS = {
+    "salesforce": (
+        ":red_circle: *Salesforce auth expired* — opp creation/updates will fail.\n"
+        "_Run in terminal:_ `sf org login web --alias ramp`"
+    ),
+    "gmail": (
+        ":red_circle: *Gmail auth expired* — email drafts will fail.\n"
+        "_Re-auth at_ <https://www.gumloop.com/personal/apps|gumloop.com/personal/apps>"
+    ),
+}
+
+
+def alert_auth_failure(connector: str, user_id: str, error: str = "") -> None:
+    """Send an immediate DM when an auth failure is detected inline.
+
+    Rate-limited: one alert per connector per user per 10 minutes.
+    """
+    import time as _time
+    now = _time.time()
+    key = (user_id, connector)
+    if now - _inline_alert_ts.get(key, 0) < _INLINE_COOLDOWN:
+        return  # already alerted recently
+
+    # Update health status
+    health.update_status(connector, "expired", error=error)
+
+    # Send DM
+    try:
+        from slack_sdk import WebClient
+        from config import SLACK_BOT_TOKEN
+        client = WebClient(token=SLACK_BOT_TOKEN)
+        msg = _REAUTH_INSTRUCTIONS.get(connector, f":red_circle: *{connector} auth expired*")
+        if error:
+            msg += f"\n_Error: {error[:200]}_"
+        client.chat_postMessage(channel=user_id, text=msg)
+        _inline_alert_ts[key] = now
+        logger.info("Inline auth alert sent to %s for %s", user_id, connector)
+    except Exception as exc:
+        logger.error("Failed to send inline auth alert: %s", exc)

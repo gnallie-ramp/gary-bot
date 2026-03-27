@@ -2,25 +2,65 @@
 
 Each template function returns a complete HTML string ready for Gmail draft
 creation. All templates include the claude-auto-draft HTML comment tracker,
-consistent wrapper styling, and Greg's email signature.
+consistent wrapper styling, and the user's email signature.
+
+Templates accept optional user_id, booking_link, and owner_name parameters
+for per-user customization. When not provided, falls back to config defaults.
 """
+from __future__ import annotations
 
-from templates.signature import SIGNATURE_HTML
+from typing import Optional
 
-BOOKING_LINK = "https://ramp-com.chilipiper.com/me/gregory-nallie/ramp"
+from config import BOOKING_LINK as _DEFAULT_BOOKING_LINK, OWNER_FIRST_NAME
+from templates.signature import SIGNATURE_HTML, build_signature
 
 _WRAPPER_OPEN = '<div style="font-family:Arial,sans-serif;font-size:14px;color:#000;max-width:600px;">'
 _WRAPPER_CLOSE = "</div>"
 _TRACKER = '<!-- claude-auto-draft -->'
 
 
-def _wrap(body_html: str) -> str:
+def _resolve_user_params(
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> tuple:
+    """Resolve booking_link and owner_name from user_id or defaults.
+
+    Returns (booking_link, first_name, signature_html).
+    """
+    sig_booking = booking_link
+    sig_name = owner_name
+
+    if user_id:
+        try:
+            from core.user_registry import get_user_booking_link, get_user_first_name, get_user
+            user = get_user(user_id)
+            if user:
+                if not sig_booking:
+                    sig_booking = get_user_booking_link(user_id)
+                if not sig_name:
+                    sig_name = get_user_first_name(user_id)
+        except Exception:
+            pass
+
+    if not sig_booking:
+        sig_booking = _DEFAULT_BOOKING_LINK or ""
+    if not sig_name:
+        sig_name = OWNER_FIRST_NAME
+
+    sig_html = build_signature(user_id=user_id) if user_id else SIGNATURE_HTML
+
+    return sig_booking, sig_name, sig_html
+
+
+def _wrap(body_html: str, signature_html: Optional[str] = None) -> str:
     """Wrap body HTML in the standard email shell with tracker and signature."""
+    sig = signature_html or SIGNATURE_HTML
     return (
         f"{_WRAPPER_OPEN}\n"
         f"  {_TRACKER}\n"
         f"  {body_html}\n"
-        f"  {SIGNATURE_HTML}\n"
+        f"  {sig}\n"
         f"{_WRAPPER_CLOSE}"
     )
 
@@ -37,12 +77,16 @@ def ach_to_card_email(
     has_payment_portal: bool,
     payment_portal_link: str = "",
     cashback_formatted: str = "",
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
 ) -> str:
     """Draft for converting an ACH/wire/check bill to card payment.
 
     Concise, cashback-forward, with step-by-step card payment instructions
     and inline payment portal link when available.
     """
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     if has_payment_portal and payment_portal_link:
         step_2 = (
@@ -80,17 +124,23 @@ style="color:#1155CC;">handy guide</a> in case you want to pay this or other ven
 in the future.</p>
 <p>Can you please let me know if you plan to pay this with a card, if you need your \
 limit increased, or if it'd be helpful to walk through it together?</p>
-<p>Best,<br>Greg</p>"""
+<p>Best,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. Procurement Trial
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def procurement_trial_email(greeting: str) -> str:
+def procurement_trial_email(
+    greeting: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
     """Draft for new Procurement trial activation."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     body = f"""\
 <p>{greeting}</p>
@@ -117,7 +167,7 @@ sure you get the most out of your trial period.</p>
 
 <p>I'd love to walk through setup together and answer any questions. Feel free
 to book time directly on my calendar here:
-<a href="{BOOKING_LINK}" style="color:#1155CC;">{BOOKING_LINK}</a></p>
+<a href="{_booking}" style="color:#1155CC;">{_booking}</a></p>
 
 <p><b>Helpful Resources</b></p>
 <ul style="padding-left:20px;">
@@ -126,9 +176,9 @@ to book time directly on my calendar here:
   <li style="margin-bottom:6px;"><a href="https://support.ramp.com/hc/en-us/articles/49437597525907-Procurement-Implementation-Best-Practices-Guide" style="color:#1155CC;">Best Practices</a></li>
 </ul>
 
-<p>Best,<br>Greg</p>"""
+<p>Best,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -137,8 +187,12 @@ to book time directly on my calendar here:
 
 def pclip_email(
     first_name: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
 ) -> str:
     """Draft for program credit limit increase notification."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     body = f"""\
 <p>Hi {first_name},</p>
@@ -156,7 +210,7 @@ for automation &amp; eliminate unnecessary systems/workflows</li>
 for cashback &amp; better terms</li>
 </ul>
 
-<p>If you want to <a href="{BOOKING_LINK}" style="color:#1155CC;">schedule a \
+<p>If you want to <a href="{_booking}" style="color:#1155CC;">schedule a \
 call</a>, I can run a vendor audit to see which vendors that you're paying \
 via ACH or wire may accept card payments with no additional fees. We can also \
 talk about some improvements to your Ramp setup to put you in a good position \
@@ -164,9 +218,9 @@ to scale and make sure you're using Ramp to its fullest potential.</p>
 
 <p>Looking forward to hearing from you!</p>
 
-<p>Thanks,<br>Greg</p>"""
+<p>Thanks,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -177,8 +231,12 @@ def large_decline_case_a_email(
     first_name: str,
     vendor_name: str,
     amount_formatted: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
 ) -> str:
     """Draft for a large decline caused by a velocity (per-transaction) limit."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     body = f"""\
 <p>Hi {first_name},</p>
@@ -200,20 +258,26 @@ this resolved quickly so the payment can go through.</p>
   <li style="margin-bottom:8px;"><b>Contact me directly</b> — Reply to this
   email or book time on my calendar and I'll help troubleshoot and get the
   payment unblocked:
-  <a href="{BOOKING_LINK}" style="color:#1155CC;">{BOOKING_LINK}</a></li>
+  <a href="{_booking}" style="color:#1155CC;">{_booking}</a></li>
 </ol>
 
-<p>Best,<br>Greg</p>"""
+<p>Best,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. Fundraise
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def fundraise_email(first_name: str) -> str:
+def fundraise_email(
+    first_name: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
     """Draft for reaching out after a customer's recent funding round."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     body = f"""\
 <p>Hi {first_name},</p>
@@ -233,12 +297,12 @@ spend less.</p>
 
 <p>Open to setting up a call in the next week or two to chat through what's \
 top of mind for your team and how Ramp can support? Feel free to select any \
-time through <a href="{BOOKING_LINK}" style="color:#1155CC;">this link</a> \
+time through <a href="{_booking}" style="color:#1155CC;">this link</a> \
 or let me know when works for you, looking forward to it!</p>
 
-<p>All the best,<br>Greg</p>"""
+<p>All the best,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -250,8 +314,12 @@ def large_decline_case_b_email(
     vendor_name: str,
     amount_formatted: str,
     available_limit_formatted: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
 ) -> str:
     """Draft for a large decline caused by insufficient open-to-buy balance."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
 
     body = f"""\
 <p>Hi {first_name},</p>
@@ -277,8 +345,68 @@ to help get this sorted out.</p>
 
 <p>Feel free to reply here or book time on my calendar so we can get this
 resolved:
-<a href="{BOOKING_LINK}" style="color:#1155CC;">{BOOKING_LINK}</a></p>
+<a href="{_booking}" style="color:#1155CC;">{_booking}</a></p>
 
-<p>Best,<br>Greg</p>"""
+<p>Best,<br>{_name}</p>"""
 
-    return _wrap(body)
+    return _wrap(body, _sig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. Automatic Card Loss
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def auto_card_loss_email(
+    first_name: str,
+    vendor_name: str,
+    estimated_cashback: str,
+    view_bill_link: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
+    """Draft for when a customer ignores the automatic card payment nudge."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+
+    # Resolve full name + title for sign-off
+    rep_title = "Growth Account Manager"
+    if user_id:
+        try:
+            from core.user_registry import get_user
+            user = get_user(user_id)
+            if user and user.get("title"):
+                rep_title = user["title"]
+        except Exception:
+            pass
+
+    body = f"""\
+<p>Hi {first_name},</p>
+
+<p>Flagging a quick save: a recent {vendor_name} invoice was eligible for fee-free card payment. \
+Ramp surfaced a prompt to pay by card, but card was not selected. Paying by card on this invoice \
+would have earned approximately <strong>${estimated_cashback} in cashback</strong> and can extend \
+cash flow until the card statement due date.</p>
+
+<ul><li>Here's the bill in Ramp: <a href="{view_bill_link}" style="color:#1155CC;">View Bill</a></li></ul>
+
+<p>We'd like to understand why card payment wasn't selected and how we can better support \
+your workflow. Would you be willing to share what influenced your decision? A quick number \
+reply works great:</p>
+
+<ol>
+<li>I didn't see the prompt to switch bill payment method to card</li>
+<li>I wasn't sure how bill payments via credit card worked</li>
+<li>I wasn't sure vendor accepts card without fees</li>
+<li>I prefer ACH for this vendor or payment type</li>
+<li>Earning cashback wasn't a priority for this payment</li>
+<li>Other</li>
+</ol>
+
+<p>If helpful, I can point you to where to switch the payment method to \
+"Pay by card" in the app or walk through it live. Just let me know.</p>
+
+<p>Thank you,</p>
+
+<p>{_name}<br>{rep_title}</p>"""
+
+    return _wrap(body, _sig)

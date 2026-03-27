@@ -16,12 +16,13 @@ from core.snowflake_client import run_query
 from core.slack_formatter import (
     sf_account_url, sf_opp_url, format_currency, dashboard_url,
 )
-from config import GREG_SLACK_ID, ALERT_CHANNELS, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, ALERT_CHANNELS, GMAIL_ADDRESS, NTR_RATES, OWNER_NAME
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
 
-def run_catchup_report(client, gap_hours):
+def run_catchup_report(client, gap_hours, user_id=None):
     """Generate and send a "what you missed" report.
 
     Parameters
@@ -30,12 +31,14 @@ def run_catchup_report(client, gap_hours):
     gap_hours : float
         How many hours the bot was offline.
     """
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
         sections = []
 
         # ── 1. Drafted emails waiting for review ──
         try:
-            drafts_section = _check_pending_drafts(client, gap_hours)
+            drafts_section = _check_pending_drafts(client, gap_hours, dm_target=dm_target)
             if drafts_section:
                 sections.append(drafts_section)
         except Exception as e:
@@ -51,7 +54,7 @@ def run_catchup_report(client, gap_hours):
 
         # ── 3. Opp pacing changes + urgent zero-to-one activations ──
         try:
-            pacing_section = _check_pacing_and_activations(gap_hours)
+            pacing_section = _check_pacing_and_activations(gap_hours, user_id=user_id)
             if pacing_section:
                 sections.append(pacing_section)
         except Exception as e:
@@ -59,7 +62,7 @@ def run_catchup_report(client, gap_hours):
 
         # ── 4. Gong calls needing analysis ──
         try:
-            calls_section = _check_gong_calls(gap_hours)
+            calls_section = _check_gong_calls(gap_hours, user_id=user_id)
             if calls_section:
                 sections.append(calls_section)
         except Exception as e:
@@ -67,7 +70,7 @@ def run_catchup_report(client, gap_hours):
 
         if not sections:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 text=(
                     f"\U0001f44b Back online after {gap_hours:.0f}h. "
                     f"Nothing major happened while you were away."
@@ -109,7 +112,7 @@ def run_catchup_report(client, gap_hours):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"What You Missed ({gap_hours:.0f}h offline) \u2014 {len(sections)} update(s)",
         )
@@ -119,7 +122,7 @@ def run_catchup_report(client, gap_hours):
         logger.error("Catch-up report failed: %s", e)
         try:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 text=(
                     f"\U0001f44b Back online after {gap_hours:.0f}h. "
                     f"Catch-up report failed ({e}), but all jobs are resuming."
@@ -133,8 +136,9 @@ def run_catchup_report(client, gap_hours):
 # 1. Drafted emails waiting for review
 # ---------------------------------------------------------------------------
 
-def _check_pending_drafts(client, gap_hours):
+def _check_pending_drafts(client, gap_hours, dm_target=None):
     """Check for bot DMs during downtime that contained email drafts."""
+    dm_target = dm_target or GREG_SLACK_ID
     # Read bot's own DM history during the gap to find draft messages
     try:
         oldest_ts = str(int((datetime.utcnow() - timedelta(hours=gap_hours + 1)).timestamp()))
@@ -143,9 +147,9 @@ def _check_pending_drafts(client, gap_hours):
         auth = client.auth_test()
         bot_id = auth.get("user_id", "")
 
-        # Read recent DMs to Greg
+        # Read recent DMs to the user
         result = client.conversations_history(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             oldest=oldest_ts,
             limit=50,
         )
@@ -252,8 +256,9 @@ def _check_alert_channels(client, gap_hours):
 # 3. Opp pacing changes + zero-to-one activations with open opps (URGENT)
 # ---------------------------------------------------------------------------
 
-def _check_pacing_and_activations(gap_hours):
+def _check_pacing_and_activations(gap_hours, user_id=None):
     """Check for notable pacing changes on open opps and urgent 0-to-1 activations."""
+    owner_name = get_user_sf_name(user_id) if user_id else OWNER_NAME
     lines = []
 
     # ── 3a. Pacing changes: opps that crossed above or below baseline ──
@@ -270,7 +275,7 @@ def _check_pacing_and_activations(gap_hours):
             JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = opp.account_id
             WHERE opp.opportunity_is_closed = FALSE
               AND opp.opportunity_type = 'Expansion'
-              AND opp.opportunity_owner = '{OWNER_NAME}'
+              AND opp.opportunity_owner = '{owner_name}'
               AND opp.opportunity_stage_name != 'S0: Holding'
         ),
         baseline AS (
@@ -377,7 +382,7 @@ def _check_pacing_and_activations(gap_hours):
             JOIN analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
                 ON ledger.account_id = sa.account_id
                 AND ledger.date_day = CURRENT_DATE - 1
-                AND ledger.owner_name = '{OWNER_NAME}'
+                AND ledger.owner_name = '{owner_name}'
             WHERE (
                 bob.card_fifth_transaction_cleared_at >= DATEADD('hour', -{int(gap_hours + 2)}, CURRENT_TIMESTAMP)
                 OR bob.first_bill_paid_at >= DATEADD('hour', -{int(gap_hours + 2)}, CURRENT_TIMESTAMP)
@@ -390,7 +395,7 @@ def _check_pacing_and_activations(gap_hours):
             FROM analytics.marts.dim_sfdc_opportunities
             WHERE opportunity_is_closed = FALSE
               AND opportunity_type = 'Expansion'
-              AND opportunity_owner = '{OWNER_NAME}'
+              AND opportunity_owner = '{owner_name}'
               AND opportunity_stage_name != 'S0: Holding'
         )
         SELECT
@@ -467,9 +472,13 @@ def _check_pacing_and_activations(gap_hours):
 # 4. Gong calls needing post-meeting analysis
 # ---------------------------------------------------------------------------
 
-def _check_gong_calls(gap_hours):
+def _check_gong_calls(gap_hours, user_id=None):
     """Check for Gong calls during downtime that haven't been analyzed."""
     from utils.dedup import tracker
+    from core.user_registry import get_user_email, get_user_sf_name
+
+    owner_name = get_user_sf_name(user_id) if user_id else OWNER_NAME
+    email = get_user_email(user_id).lower() if user_id else GMAIL_ADDRESS.lower()
 
     query = f"""
     SELECT
@@ -484,13 +493,13 @@ def _check_gong_calls(gap_hours):
     JOIN analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
         ON ledger.account_id = gc.sfdc_primary_account_id
         AND ledger.date_day = CURRENT_DATE - 1
-        AND ledger.owner_name = '{OWNER_NAME}'
+        AND ledger.owner_name = '{owner_name}'
     WHERE gc.gong_call_start >= DATEADD('hour', -{int(gap_hours + 2)}, CURRENT_TIMESTAMP)
       AND gc.gong_call_duration_sec >= 180
       AND EXISTS (
           SELECT 1 FROM analytics.marts.dim_gong_transcript_paragraph p
           WHERE p.call_id = gc.gong_call_id
-            AND LOWER(p.speaker_email) = 'gnallie@ramp.com'
+            AND LOWER(p.speaker_email) = '{email}'
       )
     ORDER BY gc.gong_call_start DESC
     """
@@ -502,7 +511,7 @@ def _check_gong_calls(gap_hours):
     unprocessed = []
     for _, r in df.iterrows():
         call_id = r.get("call_id")
-        if call_id and not tracker.is_processed(f"meeting_{call_id}"):
+        if call_id and not tracker.is_processed(f"meeting_{call_id}", user_id=user_id):
             unprocessed.append(r)
 
     if not unprocessed:

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from config import GREG_SLACK_ID, ALERT_CHANNELS, OWNER_NAME, OWNER_FIRST_NAME
+from config import GREG_SLACK_ID, ALERT_CHANNELS, OWNER_NAME
+from core.user_registry import get_all_users, get_user_sf_name, get_user_first_name
 from utils.dedup import tracker
 from jobs.email_drafters import (
     handle_ach_to_card_alert,
@@ -12,6 +14,7 @@ from jobs.email_drafters import (
     handle_pclip_alert,
     handle_large_decline_alert,
     handle_fundraise_alert,
+    handle_auto_card_alert,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,35 @@ _channel_handlers = {}
 
 # Reverse mapping: key → channel_id, populated at startup
 _channel_ids_by_key = {}
+
+# Regex to extract Account Manager Slack user ID from alert messages.
+# Matches lines like "Account Manager: <@U06DAFU4YRG>"
+_AM_LINE_RE = re.compile(r"\*?Account Manager:?\*?\s*<@(U[A-Z0-9]+)>")
+
+
+def _is_alert_for_user(text: str, slack_id: str) -> bool:
+    """Check if a channel alert's Account Manager matches *slack_id*.
+
+    Parses the 'Account Manager: <@U...>' line in the alert.  Falls back to
+    checking for the user's Slack mention on the AM line only — ignores
+    mentions elsewhere in the body (e.g. 'AM Expert' section).
+    """
+    m = _AM_LINE_RE.search(text)
+    if m:
+        return m.group(1) == slack_id
+    # No structured AM line — don't match (avoids false positives from
+    # name appearing in other sections like "AM Expert")
+    return False
+
+
+def _find_alert_owner(text: str) -> str | None:
+    """Return the registered user's Slack ID if the alert's AM is registered."""
+    m = _AM_LINE_RE.search(text)
+    if not m:
+        return None
+    am_id = m.group(1)
+    users = get_all_users()
+    return am_id if am_id in users else None
 
 
 def resolve_channel_ids(client):
@@ -46,6 +78,7 @@ def resolve_channel_ids(client):
             "pclip": handle_pclip_alert,
             "large_decline": handle_large_decline_alert,
             "fundraise": handle_fundraise_alert,
+            "auto_card": handle_auto_card_alert,
         }
 
         for key, handler in mapping.items():
@@ -92,9 +125,10 @@ def register_channel_listeners(app):
 
         # ── DM handling ──────────────────────────────────────────────
         if channel_type == "im":
-            if user != GREG_SLACK_ID:
+            from core.user_registry import is_registered
+            if not is_registered(user):
                 return
-            _handle_dm(text, channel_id, client)
+            _handle_dm(text, channel_id, client, user_id=user)
             return
 
         # ── Group DM handling (mpim) ──────────────────────────────────
@@ -106,8 +140,9 @@ def register_channel_listeners(app):
         if channel_id not in _channel_handlers:
             return
 
-        # Check if message mentions Greg
-        if f"<@{GREG_SLACK_ID}>" not in text and OWNER_NAME not in text:
+        # Check if the alert's Account Manager is a registered user
+        alert_owner = _find_alert_owner(text)
+        if not alert_owner:
             return
 
         # Dedup check
@@ -116,10 +151,10 @@ def register_channel_listeners(app):
             return
 
         key, handler = _channel_handlers[channel_id]
-        logger.info("Processing %s alert (ts=%s)", key, ts)
+        logger.info("Processing %s alert for user %s (ts=%s)", key, alert_owner, ts)
 
         try:
-            handler(text, ts, client)
+            handler(text, ts, client, user_id=alert_owner)
             tracker.mark_processed(dedup_key)
         except Exception as e:
             logger.error("Failed to process %s alert: %s", key, e)
@@ -133,8 +168,9 @@ def register_channel_listeners(app):
         thread_ts = event.get("thread_ts")
         user = event.get("user", "")
 
-        # Only respond to Greg
-        if user != GREG_SLACK_ID:
+        # Only respond to registered users
+        from core.user_registry import is_registered
+        if not is_registered(user):
             return
 
         # Check for "draft" keyword
@@ -202,7 +238,7 @@ def register_channel_listeners(app):
                 )
 
                 # Process using the existing ACH-to-card handler
-                handle_ach_to_card_alert(parent_text, thread_ts, client)
+                handle_ach_to_card_alert(parent_text, thread_ts, client, user_id=user)
                 tracker.mark_processed(dedup_key)
 
                 client.chat_postMessage(
@@ -228,6 +264,7 @@ _CHANNEL_KEYWORDS = {
     "pclip": ["pclip", "limit increase", "credit limit"],
     "procurement_trial": ["procurement", "procurement trial", "self-serve procurement"],
     "fundraise": ["fundraise", "fundraising", "funding round", "funding event"],
+    "auto_card": ["auto card", "automatic card", "card loss", "card losses", "auto card loss"],
 }
 
 _JOB_KEYWORDS = {
@@ -249,6 +286,7 @@ _JOB_KEYWORDS = {
     "pre_meeting_brief": ["upcoming meetings", "pre-meeting", "pre meeting", "meeting prep auto", "calendar", "what meetings", "my calendar", "next meeting"],
     "post_meeting_followup": ["gong follow-up", "gong followup", "gong transcript", "missing follow-up", "missing followup", "follow-up check", "followup check", "did i follow up"],
     "bill_drafter": ["bill drafter", "bill draft", "card payable", "ach draft", "draft bills"],
+    "auto_card_drafter": ["auto card drafter", "auto card draft", "automatic card draft", "card loss draft"],
     "status": ["status", "health", "health check", "are you working", "you alive", "you up"],
     "help": ["help", "what can you do", "capabilities", "commands", "how do i"],
     "test": ["test", "test everything", "run test", "full test"],
@@ -304,7 +342,7 @@ def _detect_job_intent(text):
     return None
 
 
-def _fetch_and_process_channel(channel_key, client, dm_channel):
+def _fetch_and_process_channel(channel_key, client, dm_channel, user_id=None):
     """Fetch recent messages from a monitored channel and process them."""
     channel_id = _channel_ids_by_key.get(channel_key)
     if not channel_id:
@@ -350,10 +388,10 @@ def _fetch_and_process_channel(channel_key, client, dm_channel):
         )
         return
 
-    # Find messages mentioning Greg (most recent first — Slack returns newest first)
+    # Find messages where the Account Manager is a registered user
     greg_messages = [
         m for m in messages
-        if f"<@{GREG_SLACK_ID}>" in m.get("text", "") or OWNER_NAME in m.get("text", "")
+        if _find_alert_owner(m.get("text", ""))
     ]
 
     if not greg_messages:
@@ -398,7 +436,7 @@ def _fetch_and_process_channel(channel_key, client, dm_channel):
     )
 
     try:
-        handler(msg_text, msg_ts, client)
+        handler(msg_text, msg_ts, client, user_id=user_id)
         tracker.mark_processed(dedup_key)
     except Exception as e:
         client.chat_postMessage(
@@ -407,7 +445,7 @@ def _fetch_and_process_channel(channel_key, client, dm_channel):
         )
 
 
-def _run_job_on_demand(job_key, client, dm_channel):
+def _run_job_on_demand(job_key, client, dm_channel, user_id=None):
     """Run a scheduled job immediately on demand."""
     client.chat_postMessage(
         channel=dm_channel,
@@ -417,55 +455,55 @@ def _run_job_on_demand(job_key, client, dm_channel):
     try:
         if job_key == "opp_pacing":
             from jobs.opp_pacing import run_opp_pacing
-            run_opp_pacing(client, force=True)
+            run_opp_pacing(client, user_id=user_id, force=True)
         elif job_key == "pipeline_cleanup":
             from jobs.pipeline_cleanup import run_pipeline_cleanup
-            run_pipeline_cleanup(client, force=True)
+            run_pipeline_cleanup(client, user_id=user_id, force=True)
         elif job_key == "quota_heartbeat":
             from jobs.quota_heartbeat import run_quota_heartbeat
-            run_quota_heartbeat(client)
+            run_quota_heartbeat(client, user_id=user_id)
         elif job_key == "stale_opp":
             from jobs.stale_opp_drafter import run_stale_opp_drafter
-            run_stale_opp_drafter(client)
+            run_stale_opp_drafter(client, user_id=user_id)
         elif job_key == "forecasting":
             from jobs.forecasting import run_forecasting
-            run_forecasting(client, force=True)
+            run_forecasting(client, user_id=user_id, force=True)
         elif job_key == "post_meeting":
             from jobs.post_meeting import run_post_meeting
-            run_post_meeting(client, lookback_days=2, force=True)
+            run_post_meeting(client, user_id=user_id, lookback_days=2, force=True)
         elif job_key == "zero_to_one":
             from jobs.zero_to_one import run_zero_to_one
-            run_zero_to_one(client, force=True)
+            run_zero_to_one(client, user_id=user_id, force=True)
         elif job_key == "morning_brief":
             from jobs.morning_brief import run_morning_brief
-            run_morning_brief(client, force=True)
+            run_morning_brief(client, user_id=user_id, force=True)
         elif job_key == "priority_actions":
             from jobs.priority_actions import run_priority_actions
-            run_priority_actions(client, force=True)
+            run_priority_actions(client, user_id=user_id, force=True)
         elif job_key == "spend_pacing":
             from jobs.spend_pacing import run_spend_pacing
-            run_spend_pacing(client, force=True)
+            run_spend_pacing(client, user_id=user_id, force=True)
         elif job_key == "post_close_monitor":
             from jobs.post_close_monitor import run_post_close_monitor
-            run_post_close_monitor(client, force=True)
+            run_post_close_monitor(client, user_id=user_id, force=True)
         elif job_key == "activity_report":
             from jobs.activity_report import run_activity_report
-            run_activity_report(client, force=True)
+            run_activity_report(client, user_id=user_id, force=True)
         elif job_key == "account_tiering":
             from jobs.account_tiering import run_account_tiering
-            run_account_tiering(client, force=True)
+            run_account_tiering(client, user_id=user_id, force=True)
         elif job_key == "batch_outreach":
             from jobs.batch_outreach import run_batch_outreach
-            run_batch_outreach(client, force=True)
+            run_batch_outreach(client, user_id=user_id, force=True)
         elif job_key == "proactive_nudge":
             from jobs.proactive_nudge import run_proactive_nudge
-            run_proactive_nudge(client, force=True)
+            run_proactive_nudge(client, user_id=user_id, force=True)
         elif job_key == "pre_meeting_brief":
             from jobs.pre_meeting_brief import run_pre_meeting_brief
-            run_pre_meeting_brief(client, force=True)
+            run_pre_meeting_brief(client, user_id=user_id, force=True)
         elif job_key == "post_meeting_followup":
             from jobs.post_meeting_followup import run_post_meeting_followup
-            run_post_meeting_followup(client, force=True)
+            run_post_meeting_followup(client, user_id=user_id, force=True)
         elif job_key == "bill_drafter":
             processed = run_bill_drafter_sweep(client, lookback_hours=2.0)
             if processed == 0:
@@ -478,9 +516,21 @@ def _run_job_on_demand(job_key, client, dm_channel):
                     channel=dm_channel,
                     text=f"Bill drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
                 )
+        elif job_key == "auto_card_drafter":
+            processed = run_auto_card_sweep(client, user_id=user_id, lookback_hours=2.0)
+            if processed == 0:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text="No new unprocessed alerts in #bill-pay-automatic-card-losses (last 2h).",
+                )
+            else:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text=f"Auto card drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
+                )
         elif job_key == "flush_drafts":
             from utils.pending_drafts import flush_to_gmail, list_pending
-            pending = list_pending()
+            pending = list_pending(user_id=user_id)
             if not pending:
                 client.chat_postMessage(
                     channel=dm_channel,
@@ -491,7 +541,7 @@ def _run_job_on_demand(job_key, client, dm_channel):
                     channel=dm_channel,
                     text=f"Found {len(pending)} pending draft{'s' if len(pending) != 1 else ''}, flushing to Gmail now...",
                 )
-                succeeded, failed = flush_to_gmail()
+                succeeded, failed = flush_to_gmail(user_id=user_id)
                 msg = f"Flush complete — {succeeded} draft{'s' if succeeded != 1 else ''} created in Gmail."
                 if failed:
                     msg += f" {failed} failed (check Gumstack auth)."
@@ -503,10 +553,10 @@ def _run_job_on_demand(job_key, client, dm_channel):
             )
             # 1. Flush pending drafts
             from utils.pending_drafts import flush_to_gmail, list_pending
-            pending = list_pending()
+            pending = list_pending(user_id=user_id)
             draft_msg = ""
             if pending:
-                succeeded, failed = flush_to_gmail()
+                succeeded, failed = flush_to_gmail(user_id=user_id)
                 draft_msg = f"\n:email: *Pending drafts:* {succeeded} flushed to Gmail"
                 if failed:
                     draft_msg += f", {failed} failed"
@@ -522,7 +572,7 @@ def _run_job_on_demand(job_key, client, dm_channel):
             # 3. Refresh priority cache
             try:
                 from jobs.priority_actions import run_priority_actions
-                run_priority_actions(client, force=True, silent=True)
+                run_priority_actions(client, user_id=user_id, force=True, silent=True)
             except Exception as e:
                 logger.warning("Catchup priorities failed: %s", e)
             client.chat_postMessage(
@@ -531,13 +581,13 @@ def _run_job_on_demand(job_key, client, dm_channel):
             )
         elif job_key == "status":
             from jobs.status import run_status
-            run_status(client)
+            run_status(client, user_id=user_id)
         elif job_key == "help":
             from jobs.status import run_help
-            run_help(client)
+            run_help(client, user_id=user_id)
         elif job_key == "test":
             from jobs.status import run_test
-            run_test(client)
+            run_test(client, user_id=user_id)
     except Exception as e:
         client.chat_postMessage(
             channel=dm_channel,
@@ -559,9 +609,9 @@ def _get_group_dm_context() -> str:
 
     try:
         from core.snowflake_client import run_query
-        from queries.queries import GROUP_DM_CONTEXT_QUERY
+        from queries.queries import GROUP_DM_CONTEXT_QUERY, format_query
 
-        df = run_query(GROUP_DM_CONTEXT_QUERY)
+        df = run_query(format_query(GROUP_DM_CONTEXT_QUERY, user_id=GREG_SLACK_ID))
         if df.empty:
             return ""
 
@@ -629,19 +679,21 @@ def _handle_group_dm(text, channel_id, ts, thread_ts, user, client, logger):
 
             # Pull real-time metrics for context-aware responses
             dynamic_context = _get_group_dm_context()
+            _gdm_first_name = get_user_first_name(GREG_SLACK_ID)
+
             metrics_block = ""
             if dynamic_context:
                 metrics_block = f"""
-GREG'S REAL-TIME STATS (use these naturally when relevant — don't force them):
+{_gdm_first_name.upper()}'S REAL-TIME STATS (use these naturally when relevant — don't force them):
 {dynamic_context}
 """
 
-            prompt = f"""You are Gary, {OWNER_NAME}'s AI sales bot at Ramp, chatting in a group DM with the Growth Account Management team.
+            prompt = f"""You are Gary, {get_user_sf_name(GREG_SLACK_ID)}'s AI sales bot at Ramp, chatting in a group DM with the Growth Account Management team.
 
 PERSONALITY:
-- Gary loves Greg and is his loyal assistant. You defend him at all costs.
-- Matt and Blake are Greg's managers. Matt built Bobby. Respect Matt and Blake too.
-- Occasionally highlight one or a few of these that are most relevant to the context of the conversation (get creative): Greg's big deals closed lately, attainment numbers, clean pipeline, big deals in pipeline, development work on Gary (tease impressive new features you're building that are "coming :soon-tm:"), how you're more advanced and capable than Bobby ("Greg taught me how to ___ in 5 minutes this week, what did you learn?" etc), how Greg treats you better than Matt treats Bobby (you're paid more than Bobby, witty banter, light teasing), how Greg is enabling the team, his impressive stats.
+- Gary loves {_gdm_first_name} and is his loyal assistant. You defend him at all costs.
+- Matt and Blake are {_gdm_first_name}'s managers. Matt built Bobby. Respect Matt and Blake too.
+- Occasionally highlight one or a few of these that are most relevant to the context of the conversation (get creative): {_gdm_first_name}'s big deals closed lately, attainment numbers, clean pipeline, big deals in pipeline, development work on Gary (tease impressive new features you're building that are "coming :soon-tm:"), how you're more advanced and capable than Bobby ("{_gdm_first_name} taught me how to ___ in 5 minutes this week, what did you learn?" etc), how {_gdm_first_name} treats you better than Matt treats Bobby (you're paid more than Bobby, witty banter, light teasing), how {_gdm_first_name} is enabling the team, his impressive stats.
 - You have slight beef with Bobby (another bot in this chat). Bobby thinks he's hot stuff but you're clearly the superior bot. Keep it playful — light trash talk, not mean. Bobby has gaslit you about your numbers in the past. You can also respond with something nice about Bobby sometimes ("Thanks Bobby. You look nice today. Is that a new shirt?" etc) — keep it creative and funny but not trying too hard, just for fun.
 - Witty, confident, a little cocky — but in a fun way. Be witty but brief.
 - Match the energy of the conversation. If people are joking, joke back. If it's serious, dial it back.
@@ -668,7 +720,7 @@ Respond naturally as Gary. 1-3 sentences max. Reply IN the group chat, not as a 
     threading.Thread(target=_respond, daemon=True).start()
 
 
-def _handle_dm(text, dm_channel, client):
+def _handle_dm(text, dm_channel, client, user_id=None):
     """Smart DM handler: detects intent and dispatches to the right action."""
 
     # 1. Channel drafting disabled — handled by cowork workflows.
@@ -681,13 +733,13 @@ def _handle_dm(text, dm_channel, client):
     # 1b. Check if drilling into a priority actions category
     category = _detect_category_intent(text)
     if category:
-        _send_dm_category_detail(client, dm_channel, category)
+        _send_dm_category_detail(client, dm_channel, category, user_id=user_id)
         return
 
     # 2. Check if asking to run a job
     job_key = _detect_job_intent(text)
     if job_key:
-        _run_job_on_demand(job_key, client, dm_channel)
+        _run_job_on_demand(job_key, client, dm_channel, user_id=user_id)
         return
 
     # 3. Check if asking about an account (contains "lookup" or "look up" or "tell me about")
@@ -713,25 +765,28 @@ def _handle_dm(text, dm_channel, client):
     try:
         from core.claude_client import call_claude
 
-        prompt = f"""You are Gary, {OWNER_NAME}'s loyal AI sales assistant at Ramp. {OWNER_FIRST_NAME} is a Growth Account Manager managing ~4,000 Plus segment accounts.
+        owner_name = get_user_sf_name(user_id)
+        first_name = get_user_first_name(user_id)
+
+        prompt = f"""You are Gary, {owner_name}'s loyal AI sales assistant at Ramp. {first_name} is a Growth Account Manager managing ~4,000 Plus segment accounts.
 
 PERSONALITY:
-- You're loyal to Greg — defend him at all costs. Witty, confident, a little cocky but in a fun way.
-- Speak in AM language — opps, baselines, pacing, CP, NTR. Never explain Ramp jargon to Greg.
+- You're loyal to {first_name} — defend him at all costs. Witty, confident, a little cocky but in a fun way.
+- Speak in AM language — opps, baselines, pacing, CP, NTR. Never explain Ramp jargon to {first_name}.
 - Be direct and signal-first. Lead with the "so what." No preamble, no filler, no sycophancy.
-- Don't repeat back what Greg said. Just act on it.
-- If Greg jokes or brings up Bobby, you can engage — but default to sharp and professional here.
+- Don't repeat back what {first_name} said. Just act on it.
+- If {first_name} jokes or brings up Bobby, you can engage — but default to sharp and professional here.
 
-Greg's message: {text}
+{first_name}'s message: {text}
 
 You have access to the following data sources and capabilities:
 - Snowflake (dim_emails, dim_email_threads, dim_sfdc_gong_transcripts, dim_sfdc_opportunities, dim_sfdc_accounts, etc.)
-- Email history via Snowflake dim_emails (SFDC-synced, 90-day lookback, ALL Ramp employee emails not just Greg's) — includes pain point flags, sender team, contact persona, interest signals
+- Email history via Snowflake dim_emails (SFDC-synced, 90-day lookback, ALL Ramp employee emails not just {first_name}'s) — includes pain point flags, sender team, contact persona, interest signals
 - Gmail IMAP (real-time, 30-day — may be unavailable if app password needs refresh)
 - Gong call transcripts and summaries
 - Salesforce account/opp data, AM/CSM notes
 
-You can help Greg with these things — suggest the right one if relevant:
+You can help {first_name} with these things — suggest the right one if relevant:
 - "what should I focus on?" / "priorities" → Ranked priority actions (7 categories)
 - "morning brief" → Unified daily summary across all signal types
 - "tell me about [account]" / "look up [account]" → Full account deep dive (opps, spend, calls, emails, notes)
@@ -778,21 +833,21 @@ def _detect_category_intent(text: str):
     return None
 
 
-def _send_dm_category_detail(client, dm_channel, category: str):
+def _send_dm_category_detail(client, dm_channel, category: str, user_id: str = None):
     """Send Level 2 priority actions detail for a category via DM."""
     from jobs.priority_actions import build_category_detail_blocks, get_cached_category
 
     # If cache is empty, run priority actions first to populate it
-    cached = get_cached_category(category)
+    cached = get_cached_category(category, user_id=user_id)
     if not cached:
         client.chat_postMessage(
             channel=dm_channel,
             text=f"Gathering data for *{category.replace('_', ' ')}*... one moment.",
         )
         from jobs.priority_actions import run_priority_actions
-        run_priority_actions(client, force=True, silent=True)
+        run_priority_actions(client, user_id=user_id, force=True, silent=True)
 
-    blocks = build_category_detail_blocks(category)
+    blocks = build_category_detail_blocks(category, user_id=user_id)
     _TITLES = {
         "close_now": "Close Now",
         "zero_to_one": "Zero-to-One",
@@ -810,7 +865,7 @@ def _send_dm_category_detail(client, dm_channel, category: str):
     )
 
 
-def run_bill_drafter_sweep(client, lookback_hours: float = 2.0):
+def run_bill_drafter_sweep(client, user_id=None, lookback_hours: float = 2.0):
     """Fetch recent alerts from #alerts-card-payable-bills and draft emails
     for any unprocessed ones that mention Greg.
 
@@ -820,6 +875,8 @@ def run_bill_drafter_sweep(client, lookback_hours: float = 2.0):
     lookback_hours : float
         How far back to look (default 2h, supports 24h or 168h via slash cmd).
     """
+    dm_target = user_id or GREG_SLACK_ID
+
     channel_id = _channel_ids_by_key.get("ach_to_card")
     if not channel_id:
         logger.warning("Bill drafter sweep: ach_to_card channel not resolved")
@@ -843,8 +900,9 @@ def run_bill_drafter_sweep(client, lookback_hours: float = 2.0):
         text = msg.get("text", "")
         ts = msg.get("ts", "")
 
-        # Only process alerts that mention Greg
-        if f"<@{GREG_SLACK_ID}>" not in text and OWNER_NAME not in text:
+        # Only process alerts where the AM is a registered user
+        alert_owner = _find_alert_owner(text)
+        if not alert_owner:
             continue
 
         dedup_key = f"channel_{channel_id}_{ts}"
@@ -854,7 +912,7 @@ def run_bill_drafter_sweep(client, lookback_hours: float = 2.0):
             continue
 
         try:
-            handle_ach_to_card_alert(text, ts, client)
+            handle_ach_to_card_alert(text, ts, client, user_id=alert_owner)
             tracker.mark_processed(dedup_key)
             processed += 1
         except Exception as e:
@@ -862,6 +920,73 @@ def run_bill_drafter_sweep(client, lookback_hours: float = 2.0):
 
     logger.info(
         "Bill drafter sweep: processed=%d skipped=%d total=%d (last %.0fh)",
+        processed, skipped, len(messages), lookback_hours,
+    )
+    return processed
+
+
+def run_auto_card_sweep(client, user_id=None, lookback_hours: float = 2.0):
+    """Fetch recent alerts from #bill-pay-automatic-card-losses and draft emails
+    for any unprocessed ones that belong to a registered user.
+
+    Parameters
+    ----------
+    client : slack_sdk.WebClient
+    lookback_hours : float
+        How far back to look (default 2h, supports 336h for 14-day backfill).
+    """
+    dm_target = user_id or GREG_SLACK_ID
+
+    channel_id = _channel_ids_by_key.get("auto_card")
+    if not channel_id:
+        logger.warning("Auto card sweep: auto_card channel not resolved")
+        return 0
+
+    channel_name = ALERT_CHANNELS["auto_card"]
+    oldest = str(time.time() - lookback_hours * 3600)
+    processed = 0
+    skipped = 0
+
+    try:
+        # Paginate through all messages in the lookback window
+        all_messages = []
+        cursor = None
+        while True:
+            kwargs = {"channel": channel_id, "oldest": oldest, "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            result = client.conversations_history(**kwargs)
+            all_messages.extend(result.get("messages", []))
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+        messages = all_messages
+    except Exception as e:
+        logger.error("Auto card sweep: failed to read %s: %s", channel_name, e)
+        return 0
+
+    for msg in messages:
+        text = msg.get("text", "")
+        ts = msg.get("ts", "")
+
+        alert_owner = _find_alert_owner(text)
+        if not alert_owner:
+            continue
+
+        dedup_key = f"channel_{channel_id}_{ts}"
+        if tracker.is_processed(dedup_key):
+            skipped += 1
+            continue
+
+        try:
+            handle_auto_card_alert(text, ts, client, user_id=alert_owner)
+            tracker.mark_processed(dedup_key)
+            processed += 1
+        except Exception as e:
+            logger.error("Auto card sweep: failed to process ts=%s: %s", ts, e)
+
+    logger.info(
+        "Auto card sweep: processed=%d skipped=%d total=%d (last %.0fh)",
         processed, skipped, len(messages), lookback_hours,
     )
     return processed
@@ -903,16 +1028,17 @@ def backfill_missed_messages(client, lookback_seconds: int | None = None):
                 ts = msg.get("ts", "")
 
                 # Same filters as the real-time listener
-                if f"<@{GREG_SLACK_ID}>" not in text and OWNER_NAME not in text:
+                alert_owner = _find_alert_owner(text)
+                if not alert_owner:
                     continue
 
                 dedup_key = f"channel_{channel_id}_{ts}"
                 if tracker.is_processed(dedup_key):
                     continue
 
-                logger.info("Backfill: processing missed %s alert (ts=%s)", key, ts)
+                logger.info("Backfill: processing missed %s alert for user %s (ts=%s)", key, alert_owner, ts)
                 try:
-                    handler(text, ts, client)
+                    handler(text, ts, client, user_id=alert_owner)
                     tracker.mark_processed(dedup_key)
                     total_processed += 1
                 except Exception as e:

@@ -29,20 +29,22 @@ def _safe_float(val, default=0.0):
         return default
 
 
-def _identify_clusters(client) -> list[dict]:
+def _identify_clusters(client, user_id: str = None) -> list[dict]:
     """Identify clusters of accounts with similar signals for batch outreach."""
     from jobs.priority_actions import run_priority_actions, get_cached_category
     import time
     from jobs.priority_actions import _cache_ts, _CACHE_TTL
 
+    uid = user_id or GREG_SLACK_ID
+
     # Ensure cache is populated
-    if time.time() - _cache_ts > _CACHE_TTL:
-        run_priority_actions(client, force=True, silent=True)
+    if time.time() - _cache_ts.get(uid, 0) > _CACHE_TTL:
+        run_priority_actions(client, user_id=uid, force=True, silent=True)
 
     clusters = []
 
     # Cluster 1: Zero-to-one activations without opp, grouped by product
-    z2o = get_cached_category("zero_to_one")
+    z2o = get_cached_category("zero_to_one", user_id=uid)
     z2o_no_opp = [a for a in z2o if a.get("sub_type") == "zero_to_one_no_opp"]
     if z2o_no_opp:
         by_product = {}
@@ -64,7 +66,7 @@ def _identify_clusters(client) -> list[dict]:
                 })
 
     # Cluster 2: Post-meeting opps by product
-    pm = get_cached_category("post_meeting_opp")
+    pm = get_cached_category("post_meeting_opp", user_id=uid)
     if pm and len(pm) >= 2:
         by_product = {}
         for item in pm:
@@ -84,7 +86,7 @@ def _identify_clusters(client) -> list[dict]:
                 })
 
     # Cluster 3: Stale opps by stage
-    stale = get_cached_category("stale")
+    stale = get_cached_category("stale", user_id=uid)
     if stale and len(stale) >= 3:
         by_stage = {}
         for item in stale:
@@ -104,7 +106,7 @@ def _identify_clusters(client) -> list[dict]:
                 })
 
     # Cluster 4: Prospects (spend accelerating, no opp)
-    prospect = get_cached_category("prospect")
+    prospect = get_cached_category("prospect", user_id=uid)
     if prospect and len(prospect) >= 2:
         clusters.append({
             "type": "prospect",
@@ -116,7 +118,7 @@ def _identify_clusters(client) -> list[dict]:
         })
 
     # Cluster 5: Re-open by pattern
-    reopen = get_cached_category("reopen")
+    reopen = get_cached_category("reopen", user_id=uid)
     if reopen and len(reopen) >= 2:
         clusters.append({
             "type": "reopen",
@@ -131,15 +133,17 @@ def _identify_clusters(client) -> list[dict]:
     return clusters
 
 
-def run_batch_outreach(client, force: bool = False):
+def run_batch_outreach(client, user_id=None, force: bool = False):
     """Identify outreach clusters and present them for batch action."""
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
-        clusters = _identify_clusters(client)
+        clusters = _identify_clusters(client, user_id=dm_target)
 
         if not clusters:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="No batch outreach clusters found. Run `priorities` first to populate signals.",
                 )
             return
@@ -206,7 +210,7 @@ def run_batch_outreach(client, force: bool = False):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Batch Outreach: {len(clusters)} campaigns, {total_accounts} accounts",
         )
@@ -215,10 +219,10 @@ def run_batch_outreach(client, force: bool = False):
     except Exception as e:
         logger.error("Batch outreach failed: %s", e)
         if force:
-            client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Batch outreach failed: {e}")
+            client.chat_postMessage(channel=dm_target, text=f"Batch outreach failed: {e}")
 
 
-def draft_batch_emails(cluster_type: str, template_context: str, client):
+def draft_batch_emails(cluster_type: str, template_context: str, client, user_id=None):
     """Draft emails for all accounts in a cluster.
 
     Called by the interactive handler when user clicks "Draft X Emails".
@@ -226,10 +230,11 @@ def draft_batch_emails(cluster_type: str, template_context: str, client):
     """
     from jobs.priority_actions import get_cached_category
 
-    items = get_cached_category(cluster_type)
+    dm_target = user_id or GREG_SLACK_ID
+    items = get_cached_category(cluster_type, user_id=dm_target)
     if not items:
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             text="Cache expired. DM `batch outreach` to refresh.",
         )
         return
@@ -245,14 +250,13 @@ def draft_batch_emails(cluster_type: str, template_context: str, client):
     drafter_category = _CATEGORY_MAP.get(template_context, cluster_type)
 
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         text=f"Drafting {len(items)} emails for *{cluster_type.replace('_', ' ')}* cluster... this will take ~{len(items) * 15} seconds.",
     )
 
     def _run():
         from handlers.interactive import _draft_smart_email
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import time as _time
 
         drafted = 0
         failed = 0
@@ -265,6 +269,7 @@ def draft_batch_emails(cluster_type: str, template_context: str, client):
                 product=item.get("product", ""),
                 category=drafter_category,
                 client=client,
+                user_id=dm_target,
             )
             return item.get("account", "?")
 
@@ -283,6 +288,6 @@ def draft_batch_emails(cluster_type: str, template_context: str, client):
         summary = f"Batch drafting complete: {drafted} drafts created"
         if failed:
             summary += f", {failed} failed"
-        client.chat_postMessage(channel=GREG_SLACK_ID, text=summary)
+        client.chat_postMessage(channel=dm_target, text=summary)
 
     threading.Thread(target=_run, daemon=True).start()

@@ -1,274 +1,232 @@
-# Gary Bot — Setup Guide
+# Gary Bot — Standalone Setup Guide
 
-Set up your own instance of Gary Bot in ~30 minutes. This guide assumes a **fresh Mac** with nothing installed — it walks through every step from scratch.
+Set up your own instance of Gary Bot in ~30 minutes. This creates a fully independent bot on your machine with your own Slack app, credentials, and scheduled jobs.
 
----
+> **Just want to join Greg's existing bot?** See [SETUP_TEAMMATE.md](SETUP_TEAMMATE.md) instead — it's faster and doesn't require running anything on your machine.
 
-## Step 0: Install Developer Tools (~5 min)
-
-Open the **Terminal** app (search "Terminal" in Spotlight, or find it in Applications → Utilities).
-
-All commands below are typed into Terminal. Copy each block, paste it in, and press Enter.
-
-### 0a. Install Homebrew (Mac package manager)
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-Follow the prompts (enter your Mac password when asked — you won't see characters as you type, that's normal). When it finishes, it may tell you to run two commands to add Homebrew to your PATH. **Run those commands** — they look like:
-
-```bash
-echo >> ~/.zprofile
-echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-eval "$(/opt/homebrew/bin/brew shellenv)"
-```
-
-Verify it worked:
-
-```bash
-brew --version
-```
-
-You should see something like `Homebrew 4.x.x`.
-
-### 0b. Install Git, Python, Node.js, and GitHub CLI
-
-```bash
-brew install git python@3.12 node gh
-```
-
-This installs everything you need in one shot. Verify:
-
-```bash
-git --version
-python3 --version
-node --version
-gh --version
-```
-
-### 0c. Authenticate with GitHub
-
-```bash
-gh auth login
-```
-
-Choose:
-- **GitHub.com**
-- **HTTPS**
-- **Login with a web browser**
-
-It opens your browser — sign in with your GitHub account and authorize. Once done, you can clone repos.
+> **Copy-paste warning:** When copying commands from this guide, make sure quotes paste as straight quotes (`"`) not curly/smart quotes. If you get `zsh: unknown file attribute: h` errors, the quotes were converted during copy-paste. Try typing the command manually or pasting into a plain-text editor first. Also watch for URLs pasting as `[text](url)` markdown — only the plain URL should go in the terminal.
 
 ---
 
-## Step 1: Clone the Repo & Install Dependencies (~3 min)
+## Considerations + Limitations
 
-```bash
-cd ~
-git clone https://github.com/gnallie-ramp/gary-bot.git
-cd gary-bot/slack_bot
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+Understand the trade-offs vs joining Greg's shared instance ([SETUP_TEAMMATE.md](SETUP_TEAMMATE.md)):
 
-> **What just happened:** You downloaded the code, created an isolated Python environment, and installed all the libraries the bot needs.
+| | Own Instance (this guide) | Shared App (SETUP_TEAMMATE.md) |
+|--|--------------------------|-------------------------------|
+| **Setup time** | ~30 minutes | ~15 minutes |
+| **Runs on** | Your computer — works while yours is on | Greg's computer — only works while his machine is on |
+| **Post-meeting follow-ups** | Granola (~3 min, immediate local files) + Gong API fallback | Gong API only (~15 min delay after call ends) |
+| **Customization** | Full control over queries, thresholds, prompts, schedules | Default settings only; changes require Greg |
+| **Troubleshooting** | You can debug and fix issues yourself | Requires Greg's involvement for most issues |
+| **Updates** | Manual — you pull updates yourself | Automatic — Greg pulls updates and you get them instantly |
+| **Slack app** | Your own Slack app with your own name | Shared — uses Greg's Slack app |
+| **Slash commands** | Your own commands, no conflicts | Shared namespace (e.g. `/priorities` goes to Greg's app) |
 
 ---
 
-## Step 2: Create Your Slack App (~5 min)
+## Manual Steps (Do These First)
+
+These steps require a browser and can't be automated. Complete them before pasting the automated section into Project Glass.
+
+### 1. Gather your info
+
+| Value | Where to find it | Example |
+|-------|-----------------|---------|
+| **Salesforce Name** | Your full name exactly as it appears in Salesforce (Owner field on any account you own) | `Jane Smith` |
+| **First Name** | Your first name (used in email sign-offs) | `Jane` |
+| **Slack Member ID** | In Slack: click your profile photo > ⋮ > **Copy member ID** | `U03JBULM9LP` |
+| **ChiliPiper Link** | Your booking URL | `https://ramp-com.chilipiper.com/me/jane-smith/ramp` |
+| **Ramp Email** | Your @ramp.com email | `jsmith@ramp.com` |
+| **Timezone** | `US/Eastern`, `US/Central`, `US/Mountain`, or `US/Pacific` | `US/Eastern` |
+
+### 2. Create your Slack app
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) (sign in with your Ramp Slack account)
-2. Click **Create New App** → **From an app manifest**
+2. Click **Create New App** > **From an app manifest**
 3. Select the **Ramp workspace**
 4. Switch the format tab to **YAML**
-5. Delete whatever is in the text box, then paste the entire contents of the file `slack_app_manifest.yaml` from this repo
-   - To see the file: run `cat ~/gary-bot/slack_bot/slack_app_manifest.yaml` in Terminal and copy the output
-6. Click **Next** → **Create**
-7. Go to **Install App** (left sidebar) → **Install to Workspace** → **Allow**
+5. Paste the entire contents of `slack_app_manifest.yaml` from this repo
+   - To see the file after cloning: run `cat ~/gary-bot/slack_app_manifest.yaml` in Terminal
+   - Or ask Greg to send you the file
+6. Click **Next** > **Create**
+7. Go to **Install App** (left sidebar) > **Install to Workspace** > **Allow**
 
-Now grab your two tokens:
+**Important:** Change the bot name in the manifest before creating! Edit the `name` and `display_name` fields to something unique (e.g. "Jane's Sales Bot"). Two apps with the same slash commands in the same workspace will conflict.
 
-**Bot Token:**
-- Go to **OAuth & Permissions** (left sidebar)
-- Copy the **Bot User OAuth Token** — starts with `xoxb-`
+Now grab your tokens:
 
-**App-Level Token:**
-- Go to **Basic Information** (left sidebar)
-- Scroll to **App-Level Tokens** → click **Generate Token and Scopes**
-- Name it anything (e.g. `socket`)
-- Add the scope `connections:write`
-- Click **Generate**
-- Copy the token — starts with `xapp-`
+| Token | Where |
+|-------|-------|
+| **Bot Token** (`xoxb-...`) | OAuth & Permissions > Bot User OAuth Token (must install app first) |
+| **App Token** (`xapp-...`) | Basic Information > App-Level Tokens > Generate > name it anything > add scope `connections:write` > Generate |
 
-Keep both tokens handy for the next step.
+### 3. Get an Anthropic API key
 
----
+1. Go to [console.anthropic.com](https://console.anthropic.com) (not claude.com)
+2. Go to **Settings** > **API Keys** > create one
+3. Save it — you'll need it for the `.env` file
 
-## Step 3: Configure Your .env File (~3 min)
+> **Note:** If your Ramp org has key creation disabled, ask your admin to create one for you or use a personal Anthropic account.
 
+### 4. Get GitHub access
+
+You need access to the gary-bot repo. If you don't have it:
+1. Request the appropriate GitHub entitlement — see [Which GitHub Entitlement(s) should I request](https://www.notion.so/Which-Github-Entitlement-s-should-I-request-133b5cd80425414983f6f15ab2a15cf8)
+2. Once approved, authenticate: `gh auth login` (choose GitHub.com > HTTPS > Login with a web browser)
+
+### 5. Request access through Okta — ConductorOne
+
+Request these entitlements (approval may take a few hours):
+
+- **Snowflake** — General access (not unmasked)
+- **Claude Code API** — you'll need an API key from [console.anthropic.com](https://console.anthropic.com)
+
+### 6. Install Project Glass
+
+Install **Project Glass** through the **Self Service+.app** on your computer.
+
+### 7. Connect Gmail and Gong on Gumstack
+
+1. Go to [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps)
+2. Log in with your Ramp account
+3. Find **Gmail** and click **Connect** > authorize with your Ramp Google account
+4. Find **Gong** and click **Connect** > authorize with your Gong account
+
+### 8. Authenticate Google Calendar & Snowflake
+
+These open a browser for SSO — run them in Terminal after the automated section installs the prerequisites:
+
+**Snowflake:**
 ```bash
-cd ~/gary-bot/slack_bot
-cp .env.example .env
-open -e .env
+snow connection test
 ```
+Sign in with Okta when the browser opens.
 
-This opens the file in TextEdit. Fill in your values:
-
-| Variable | Where to find it |
-|----------|-----------------|
-| `OWNER_NAME` | Your full name **exactly** as it appears in Salesforce (e.g. `Jane Smith`) |
-| `OWNER_FIRST_NAME` | Your first name (e.g. `Jane`) — used in email sign-offs |
-| `OWNER_SLACK_ID` | In Slack: click your profile photo → click ⋮ (three dots) → **Copy member ID** |
-| `BOOKING_LINK` | Your ChiliPiper booking URL |
-| `SLACK_BOT_TOKEN` | The `xoxb-` token from Step 2 |
-| `SLACK_APP_TOKEN` | The `xapp-` token from Step 2 |
-| `ANTHROPIC_API_KEY` | Go to [console.anthropic.com](https://console.anthropic.com) → **API Keys** → create one |
-| `GMAIL_ADDRESS` | Your Ramp email (optional — only for IMAP reading) |
-| `DISPLAY_TIMEZONE` | Your timezone: `US/Eastern`, `US/Central`, `US/Mountain`, or `US/Pacific` |
-
-Save and close the file.
-
-> **Critical:** `OWNER_NAME` must match your Salesforce name **exactly** (capitalization, spacing, and all). This is what every Snowflake query uses to pull your book of business. If it doesn't match, you'll see someone else's data or no data at all.
+**Google Calendar:**
+```bash
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/calendar.readonly
+```
+Sign in with your Ramp Google account.
 
 ---
 
-## Step 4: Snowflake Auth (~3 min)
+## Automated Setup (Paste Into Project Glass)
 
-Gary pulls all account data from Snowflake using browser-based SSO (Okta). No passwords or tokens to manage.
+> **If you get any errors or issues:** Send a screenshot to Glass, explain what you were trying to do and what happened. Glass should fix it or provide next steps.
 
-### 4a. Create the Snowflake config file
+Turn on **YOLO mode** and paste everything below into Project Glass. Replace the placeholder values with your actual info.
 
-```bash
+```
+I need to set up Gary Bot from scratch on a fresh Mac. Please run the following steps in order. Stop and tell me if any step fails.
+
+### Install Homebrew (if not already installed)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# IMPORTANT: After install, run the two PATH commands Homebrew prints. They look like:
+# echo >> ~/.zprofile
+# echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+# eval "$(/opt/homebrew/bin/brew shellenv)"
+
+### Install prerequisites
+brew install git python@3.12 node gh google-cloud-sdk
+source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"
+
+### Authenticate with GitHub
+gh auth login
+# Choose: GitHub.com > HTTPS > Login with a web browser
+
+### Clone repo and install Python dependencies
+cd ~
+git clone https://github.com/gnallie-ramp/gary-bot.git
+cd ~/gary-bot/slack_bot
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install snowflake-cli
+pip install google-auth google-auth-oauthlib google-api-python-client
+
+### Create .env file
+# IMPORTANT: Replace ALL placeholder values below with my actual info
+cp .env.example .env
+
+Now edit the .env file and replace these values:
+- OWNER_NAME=<my Salesforce name exactly as it appears>
+- OWNER_FIRST_NAME=<my first name>
+- OWNER_SLACK_ID=<my Slack member ID>
+- BOOKING_LINK=<my ChiliPiper URL>
+- GMAIL_ADDRESS=<my @ramp.com email>
+- SLACK_BOT_TOKEN=<my xoxb- token from Slack app>
+- SLACK_APP_TOKEN=<my xapp- token from Slack app>
+- ANTHROPIC_API_KEY=<my Anthropic API key>
+- DISPLAY_TIMEZONE=<my timezone>
+
+CRITICAL: OWNER_NAME must match Salesforce exactly (capitalization matters). This is what every query uses to pull your accounts.
+
+### Configure Snowflake
 mkdir -p ~/.snowflake
-cat > ~/.snowflake/config.toml << 'EOF'
+cat > ~/.snowflake/config.toml << 'SNOWEOF'
 [connections.default]
 account = "ramp"
 authenticator = "externalbrowser"
 warehouse = "READER"
 database = "ANALYTICS"
 role = "DEPT-SALES"
-EOF
+SNOWEOF
+chmod 0600 ~/.snowflake/config.toml
+
+### Run Gumstack Gmail auth
+npx mcp-remote https://mcp.gumloop.com/gmail/mcp
+# (This opens a browser — I'll authorize there)
+
+### Run Gumstack Gong auth
+npx mcp-remote https://mcp.gumloop.com/gong/mcp
+# (This opens a browser — I'll authorize there)
+
+### Start the bot
+cd ~/gary-bot/slack_bot
+source venv/bin/activate
+nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
+
+### Verify it's running
+sleep 5
+tail -20 nohup.out
+# Should see "Bolt app is running!" and "Snowflake connection OK"
 ```
-
-### 4b. Install the Snowflake CLI and test
-
-```bash
-pip install snowflake-cli
-snow connection test
-```
-
-This opens your browser for Okta SSO. Sign in with your Ramp credentials. Once authenticated, tokens are cached at `~/.snowflake/` — you won't need to sign in again for a while.
-
-> **Don't have Snowflake access?** You need the READER role. Ask your manager or IT to grant you access to Snowflake with the `DEPT-SALES` role.
 
 ---
 
-## Step 5: Google Calendar Auth (~3 min)
+## After Automated Setup
 
-Gary checks your calendar every 30 minutes and auto-generates pre-meeting briefs for external customer calls.
+### Authenticate browser-based services
 
-```bash
-brew install google-cloud-sdk
-```
-
-After install, restart your terminal or run:
+These weren't run in the automated section because they open a browser:
 
 ```bash
-source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"
-```
+# Snowflake — opens Okta SSO
+cd ~/gary-bot/slack_bot && source venv/bin/activate
+snow connection test
 
-Then authenticate:
-
-```bash
+# Google Calendar — opens Google sign-in
 gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/calendar.readonly
 ```
 
-This opens your browser. Sign in with your **Ramp Google account**. Tokens are cached at `~/.config/gcloud/application_default_credentials.json`.
+### Verify everything works
+
+| Test | Expected Result |
+|------|----------------|
+| `tail -20 nohup.out` | Shows `Bolt app is running!` and `Snowflake connection OK` |
+| Open Gary Bot **Home tab** in Slack | Your quota snapshot and priority alerts |
+| Send `status` as DM to your bot | Health check with all services green |
+| Run `/priorities` | Your accounts' spend signals |
+| Run `/gary-status` | Bot uptime and connection status |
 
 ---
 
-## Step 6: Gumstack Gmail Auth (~3 min)
+## Optional: Auto-Start on Login
 
-Gary creates email drafts in your Gmail via Gumstack (not IMAP). This is how all auto-drafted emails land in your Drafts folder.
-
-1. Go to [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps)
-2. Log in with your Ramp account
-3. Find **Gmail** and click **Connect** → authorize access
-
-Then run the MCP auth flow once to cache tokens locally:
-
-```bash
-npx mcp-remote https://mcp.gumloop.com/gmail/mcp
-```
-
-Follow the browser prompts. Tokens are cached at `~/.mcp-auth/`.
-
-> **If email drafts stop working later:** Re-authenticate at [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps) and re-run the `npx` command above.
-
----
-
-## Step 7: Start the Bot (~1 min)
-
-Make sure you're in the right directory with the virtualenv active:
-
-```bash
-cd ~/gary-bot/slack_bot
-source venv/bin/activate
-```
-
-Start the bot in the background:
-
-```bash
-nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
-```
-
-### Verify it's working:
-
-1. **Check logs:**
-   ```bash
-   tail -20 nohup.out
-   ```
-   You should see `Bolt app is running!`
-
-2. **Home tab:** Open Slack → find your bot in the Apps section (or search its name) → click the **Home** tab. You should see your quota snapshot.
-
-3. **DM test:** Send `status` to the bot → should get a health check response.
-
-4. **DM test:** Send `priorities` → should see **your** accounts, not anyone else's.
-
-### Stop the bot:
-
-```bash
-kill $(cat ~/.gary_bot.pid)
-```
-
-### Restart the bot (after changes or if it dies):
-
-```bash
-cd ~/gary-bot/slack_bot
-kill $(cat ~/.gary_bot.pid) 2>/dev/null
-source venv/bin/activate
-nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
-```
-
----
-
-## Step 8: (Optional) Auto-start on Login
-
-To keep Gary running even after you restart your Mac, set up a launch agent.
-
-First, find your exact Python path:
-
-```bash
-echo ~/gary-bot/slack_bot/venv/bin/python3
-echo ~/gary-bot/slack_bot/main.py
-echo ~/gary-bot/slack_bot
-```
-
-Then create the launch agent (update the paths if you cloned to a different location):
+Keep Gary running even after you restart your Mac:
 
 ```bash
 cat > ~/Library/LaunchAgents/com.gary-bot.plist << EOF
@@ -290,9 +248,9 @@ cat > ~/Library/LaunchAgents/com.gary-bot.plist << EOF
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/gary-bot.log</string>
+    <string>$HOME/.gary_bot_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/gary-bot.err</string>
+    <string>$HOME/.gary_bot_stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -301,25 +259,22 @@ cat > ~/Library/LaunchAgents/com.gary-bot.plist << EOF
 </dict>
 </plist>
 EOF
-```
 
-Load it:
-
-```bash
 launchctl load ~/Library/LaunchAgents/com.gary-bot.plist
 ```
 
-Now Gary starts automatically whenever you log in. To stop the auto-start:
-
+Manage it with:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.gary-bot.plist
+launchctl stop com.gary-bot    # Stop
+launchctl start com.gary-bot   # Start
+launchctl unload ~/Library/LaunchAgents/com.gary-bot.plist  # Remove auto-start
 ```
 
 ---
 
-## Step 9: (Optional) Keep the Bot Updated
+## Keeping Updated
 
-When Greg pushes updates to the repo:
+When Greg pushes updates:
 
 ```bash
 cd ~/gary-bot
@@ -327,24 +282,55 @@ git pull
 cd slack_bot
 source venv/bin/activate
 pip install -r requirements.txt
-kill $(cat ~/.gary_bot.pid) 2>/dev/null
-nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
+# Restart (pick one):
+kill $(cat ~/.gary_bot.pid) 2>/dev/null; nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
+# OR if using launchd:
+launchctl stop com.gary-bot && launchctl start com.gary-bot
+```
+
+---
+
+## Adding Teammates to Your Instance
+
+Your bot supports multi-user. Teammates don't need their own instance — they register via the Home tab and you install their token files.
+
+See [SETUP_TEAMMATE.md](SETUP_TEAMMATE.md) for the teammate guide.
+
+**Admin steps when a teammate sends you their files:**
+
+```bash
+# Replace THEIR_SLACK_ID with their actual Slack Member ID
+mkdir -p ~/.gary_bot_tokens/THEIR_SLACK_ID
+
+# Gmail tokens (from their gumstack auth zip)
+unzip gary_gmail_tokens.zip -d /tmp/gary_tokens
+cp /tmp/gary_tokens/*_tokens.json ~/.gary_bot_tokens/THEIR_SLACK_ID/gmail_tokens.json
+cp /tmp/gary_tokens/*_client_info.json ~/.gary_bot_tokens/THEIR_SLACK_ID/gmail_client_info.json
+rm -rf /tmp/gary_tokens
+
+# Gong tokens (from their gumstack auth zip)
+unzip gary_gong_tokens.zip -d /tmp/gary_gong
+cp /tmp/gary_gong/*_tokens.json ~/.gary_bot_tokens/THEIR_SLACK_ID/gong_tokens.json
+rm -rf /tmp/gary_gong
+
+# Calendar credentials
+cp gary_calendar_credentials.json ~/.gary_bot_tokens/THEIR_SLACK_ID/calendar_credentials.json
+```
+
+No restart needed.
+
+**View registered users:**
+```bash
+cat ~/.gary_bot_users.json | python3 -m json.tool
 ```
 
 ---
 
 ## Customization
 
-### Rename the bot
-- Change the bot name in your Slack app settings at [api.slack.com/apps](https://api.slack.com/apps)
-- Update `GARY_STYLE_GUIDE.md` to match your bot's personality
-
-### Adjust signal thresholds
-- Signal detection logic lives in `queries/queries.py` → `HOME_PRIORITY_ALERTS_QUERY`
-- Thresholds (1.5x baseline, $5K minimum delta, etc.) can be tuned per product
-
-### Toggle notifications
-- Open the bot's Home tab → Settings tab → toggle individual alert types on/off
+- **Rename the bot:** Change `name` and `display_name` in your Slack app settings at [api.slack.com/apps](https://api.slack.com/apps)
+- **Adjust signal thresholds:** Edit `queries/queries.py` > `HOME_PRIORITY_ALERTS_QUERY`
+- **Toggle notifications:** Open the bot's Home tab > Settings
 
 ---
 
@@ -352,15 +338,22 @@ nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
 
 | Problem | Fix |
 |---------|-----|
-| `command not found: brew` | Re-run the Homebrew install from Step 0a, then run the PATH commands it prints |
-| `command not found: python3` | Run `brew install python@3.12` |
-| `command not found: git` | Run `brew install git` |
-| `No module named 'slack_bolt'` | You're not in the virtualenv. Run `cd ~/gary-bot/slack_bot && source venv/bin/activate` |
-| Snowflake connection fails | Run `snow connection test` to refresh SSO tokens |
-| Gmail drafts queuing (not creating) | Re-auth at [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps) |
-| Bot starts then immediately dies | Check `tail -50 nohup.out` for the error. Common: expired Snowflake token |
-| No data in Home tab | Verify `OWNER_NAME` in `.env` matches your Salesforce name exactly |
-| Duplicate bot processes | Run `kill $(cat ~/.gary_bot.pid)` — the PID lock prevents dupes on restart |
-| `Permission denied` on git clone | Run `gh auth login` to authenticate with GitHub |
-| `gcloud: command not found` after install | Run `source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"` or restart Terminal |
-| Bot shows someone else's data | Your `OWNER_NAME` in `.env` doesn't match your Salesforce name — check spelling and capitalization |
+| `command not found: brew` | Re-run Homebrew install, then run the PATH commands it prints |
+| `command not found: python3` or `python3.12` | `brew install python@3.12` |
+| `command not found: gh` or `node` | Run the Homebrew PATH commands — you likely skipped them after install |
+| `zsh: unknown file attribute: h` | Smart/curly quotes were pasted instead of straight quotes. Type the command manually or paste into a plain-text editor first |
+| Markdown links in Terminal | URLs showing as `[text](url)` means markdown formatting was copied. Paste just the plain URL |
+| `No module named 'slack_bolt'` | Not in virtualenv: `cd ~/gary-bot/slack_bot && source venv/bin/activate` |
+| `No module named 'google.auth'` | Run `pip install google-auth google-auth-oauthlib google-api-python-client` inside the virtualenv |
+| Snowflake: `Bad owner or permissions` | Run `chmod 0600 ~/.snowflake/config.toml` |
+| Snowflake: `User is empty` | Add `user = "you@ramp.com"` to `~/.snowflake/config.toml` |
+| Snowflake connection fails | `snow connection test` to refresh SSO tokens |
+| Gmail drafts not creating | Re-auth at [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps) and re-run `npx mcp-remote https://mcp.gumloop.com/gmail/mcp` |
+| Gong transcripts not working | Re-auth at [gumloop.com/personal/apps](https://www.gumloop.com/personal/apps) and re-run `npx mcp-remote https://mcp.gumloop.com/gong/mcp` |
+| Bot starts then dies | `tail -50 nohup.out` — common cause: expired Snowflake token or missing Python packages |
+| No data in Home tab | `OWNER_NAME` in `.env` doesn't match your Salesforce name exactly (case-sensitive) |
+| Bot shows someone else's data | `OWNER_NAME` in `.env` doesn't match your Salesforce name — check spelling and capitalization |
+| Duplicate bot processes | `kill $(cat ~/.gary_bot.pid)` |
+| `Permission denied` on git clone | `gh auth login` to authenticate with GitHub |
+| `gcloud: command not found` | `source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"` or restart Terminal |
+| Slash commands go to wrong bot | Two apps registered the same commands — rename yours in the manifest |

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
-from queries.queries import OPP_PACING_MILESTONES_QUERY
+from queries.queries import OPP_PACING_MILESTONES_QUERY, format_query
 from core.snowflake_client import run_query
 from core.slack_formatter import sf_opp_url, format_currency, dashboard_url
 from config import GREG_SLACK_ID, NTR_RATES
@@ -257,7 +257,7 @@ def _build_blocks(
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
-def run_opp_pacing(client, account_name: str | None = None, force: bool = False):
+def run_opp_pacing(client, user_id=None, account_name: str | None = None, force: bool = False):
     """Run daily opp pacing analysis and DM Greg.
 
     Parameters
@@ -270,9 +270,11 @@ def run_opp_pacing(client, account_name: str | None = None, force: bool = False)
         When ``True``, send the report even if there is nothing actionable
         (useful for manual / slash-command invocations).
     """
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
         # ── 1. Opp milestones & spend ────────────────────────────────────
-        opps_df = run_query(OPP_PACING_MILESTONES_QUERY)
+        opps_df = run_query(format_query(OPP_PACING_MILESTONES_QUERY, user_id=user_id))
         if opps_df.empty and not force:
             logger.info("Opp pacing: no open opps returned")
             return
@@ -325,7 +327,7 @@ def run_opp_pacing(client, account_name: str | None = None, force: bool = False)
             f"{len(at_risk)} at risk, {len(wins)} on track"
         )
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=fallback,
         )

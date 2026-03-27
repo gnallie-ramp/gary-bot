@@ -16,7 +16,8 @@ import time
 # Limit concurrent draft threads to prevent Snowflake connection overload
 _draft_semaphore = threading.Semaphore(3)
 
-from config import GREG_SLACK_ID, OWNER_NAME, OWNER_FIRST_NAME, BOOKING_LINK
+from config import GREG_SLACK_ID
+from core.user_registry import get_user_sf_name, get_user_first_name, get_user_booking_link
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ def register_interactive_handlers(app):
     def handle_create_gmail_draft(ack, body, client):
         """Handle Create Gmail Draft button — writes draft to /tmp for Glass to pick up."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -79,7 +81,7 @@ def register_interactive_handlers(app):
                 if not draft:
                     client.chat_postEphemeral(
                         channel=body["channel"]["id"],
-                        user=GREG_SLACK_ID,
+                        user=user_id,
                         text=f"Draft {draft_id} not found in pending drafts.",
                     )
                     return
@@ -87,7 +89,7 @@ def register_interactive_handlers(app):
                 if draft.get("status") == "sent":
                     client.chat_postEphemeral(
                         channel=body["channel"]["id"],
-                        user=GREG_SLACK_ID,
+                        user=user_id,
                         text="\u2705 Draft already created in Gmail.",
                     )
                     return
@@ -100,7 +102,7 @@ def register_interactive_handlers(app):
 
                 client.chat_postEphemeral(
                     channel=body["channel"]["id"],
-                    user=GREG_SLACK_ID,
+                    user=user_id,
                     text="\u2709\ufe0f Draft flagged for immediate creation — should appear in Gmail within ~1 min.",
                 )
             except Exception as e:
@@ -112,6 +114,7 @@ def register_interactive_handlers(app):
     def handle_create_opp_sfdc(ack, body, client):
         """Handle Create Opp button — creates opportunity directly in Salesforce via sf CLI."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -133,13 +136,13 @@ def register_interactive_handlers(app):
 
         if not account_id:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text=f"Cannot create opp for *{account_name}* — no SFDC account match.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Creating *{product}* opp for *{account_name}*...",
         )
 
@@ -211,7 +214,7 @@ def register_interactive_handlers(app):
                         gong_url = get_gong_call_url(account_id)
                     except Exception:
                         pass
-                if gong_url:
+                if gong_url and len(gong_url) <= 255:
                     fields["Gong_Outreach_Link__c"] = gong_url
 
                 # Pre-fill WinReasonDetail__c
@@ -225,7 +228,7 @@ def register_interactive_handlers(app):
                 if opp_id:
                     opp_link = sf_opp_url(opp_id)
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         blocks=[
                             {
                                 "type": "section",
@@ -243,13 +246,13 @@ def register_interactive_handlers(app):
                     )
                 else:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"Failed to create *{product}* opp for *{account_name}*. Check sf CLI auth: `sf org login web --alias ramp`",
                     )
             except Exception as e:
                 logger.error("SFDC opp creation failed for %s: %s", account_name, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Failed to create opp: {e}",
                 )
 
@@ -349,7 +352,7 @@ def register_interactive_handlers(app):
                         gong_url = get_gong_call_url(account_id)
                     except Exception:
                         pass
-                if gong_url:
+                if gong_url and len(gong_url) <= 255:
                     fields["Gong_Outreach_Link__c"] = gong_url
 
                 # Pre-fill WinReasonDetail__c
@@ -433,6 +436,7 @@ def register_interactive_handlers(app):
     def handle_update_opp_sfdc(ack, body, client):
         """Handle Apply Update button — updates existing opp fields in Salesforce."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -448,13 +452,13 @@ def register_interactive_handlers(app):
 
         if not account_id or not field_updates:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text=f"Cannot update opp — missing account or fields.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Updating *{product}* opp for *{account_name}*...",
         )
 
@@ -476,7 +480,7 @@ def register_interactive_handlers(app):
 
                 if not opps:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"No open *{product}* opp found for *{account_name}*.",
                     )
                     return
@@ -498,7 +502,7 @@ def register_interactive_handlers(app):
 
                 if not sf_fields:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"No valid fields to update for *{product}* opp.",
                     )
                     return
@@ -508,7 +512,7 @@ def register_interactive_handlers(app):
                     opp_link = sf_opp_url(opp_id)
                     updates_summary = ", ".join(f"{k}={v}" for k, v in sf_fields.items())
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         blocks=[{
                             "type": "section",
                             "text": {
@@ -524,13 +528,13 @@ def register_interactive_handlers(app):
                     )
                 else:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"Failed to update *{product}* opp. Check sf CLI auth.",
                     )
             except Exception as e:
                 logger.error("SFDC opp update failed for %s: %s", account_name, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Failed to update opp: {e}",
                 )
 
@@ -550,6 +554,7 @@ def register_interactive_handlers(app):
     def handle_glass_email_draft(ack, body, client):
         """Handle Create Draft via Glass — reads full email from pending_drafts file."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         from utils.pending_drafts import get_draft
 
         action = body.get("actions", [{}])[0]
@@ -563,7 +568,7 @@ def register_interactive_handlers(app):
         if not draft_id:
             # Legacy fallback: old-style payload with inline email fields
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text="Could not find draft — button payload missing draft_id.",
             )
             return
@@ -571,7 +576,7 @@ def register_interactive_handlers(app):
         draft = get_draft(draft_id)
         if not draft:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text=f"Pending draft `{draft_id}` not found. It may have been cleaned up.",
             )
             return
@@ -609,7 +614,7 @@ def register_interactive_handlers(app):
             },
         ]
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             blocks=email_blocks,
             text=f"Email draft for: {subject}",
         )
@@ -618,7 +623,7 @@ def register_interactive_handlers(app):
         plain_body = _re.sub(r'<[^>]+>', '', html_body).strip()
         if plain_body:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text=plain_body[:3000],
             )
 
@@ -626,6 +631,7 @@ def register_interactive_handlers(app):
     def handle_account_context(ack, body, client):
         """Handle Context button — runs account deep dive."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
         try:
@@ -636,24 +642,24 @@ def register_interactive_handlers(app):
         account_name = payload.get("account", "")
         if not account_name:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text="Could not identify the account.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Pulling full context for *{account_name}*... (~10 sec)",
         )
 
         def _run():
             try:
                 from jobs.account_deep_dive import run_account_deep_dive
-                run_account_deep_dive(account_name, client, GREG_SLACK_ID)
+                run_account_deep_dive(account_name, client, user_id)
             except Exception as e:
                 logger.error("Account context failed for %s: %s", account_name, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Failed to pull context for *{account_name}*: {e}",
                 )
 
@@ -663,6 +669,7 @@ def register_interactive_handlers(app):
     def handle_batch_draft(ack, body, client):
         """Handle Batch Draft button — drafts emails for a cluster."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
         try:
@@ -676,14 +683,14 @@ def register_interactive_handlers(app):
 
         if not cluster_type:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text="Could not identify the cluster. DM `batch outreach` to refresh.",
             )
             return
 
         def _run():
             from jobs.batch_outreach import draft_batch_emails
-            draft_batch_emails(cluster_type, template_context, client)
+            draft_batch_emails(cluster_type, template_context, client, user_id=user_id)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -692,77 +699,92 @@ def register_interactive_handlers(app):
     @app.action("priority_show_early_accel")
     def handle_show_early_accel(ack, body, client):
         ack()
-        _send_category_detail(client, "early_accel")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "early_accel", user_id)
 
     @app.action("priority_show_close_window")
     def handle_show_close_window(ack, body, client):
         ack()
-        _send_category_detail(client, "close_window")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "close_window", user_id)
 
     @app.action("priority_show_close_now")
     def handle_show_close_now(ack, body, client):
         ack()
-        _send_category_detail(client, "close_now")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "close_now", user_id)
 
     @app.action("priority_show_leading")
     def handle_show_leading(ack, body, client):
         ack()
-        _send_category_detail(client, "leading")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "leading", user_id)
 
     @app.action("priority_show_first_bill")
     def handle_show_first_bill(ack, body, client):
         ack()
-        _send_category_detail(client, "first_bill")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "first_bill", user_id)
 
     @app.action("priority_show_zero_to_one")
     def handle_show_zero_to_one(ack, body, client):
         ack()
-        _send_category_detail(client, "zero_to_one")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "zero_to_one", user_id)
 
     @app.action("priority_show_sustained_accel")
     def handle_show_sustained_accel(ack, body, client):
         ack()
-        _send_category_detail(client, "sustained_accel")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "sustained_accel", user_id)
 
     @app.action("priority_show_followup")
     def handle_show_followup(ack, body, client):
         ack()
-        _send_category_detail(client, "followup")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "followup", user_id)
 
     @app.action("priority_show_stale")
     def handle_show_stale(ack, body, client):
         ack()
-        _send_category_detail(client, "stale")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "stale", user_id)
 
     @app.action("priority_show_post_meeting_opp")
     def handle_show_post_meeting_opp(ack, body, client):
         ack()
-        _send_category_detail(client, "post_meeting_opp")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "post_meeting_opp", user_id)
 
     @app.action("priority_show_reopen")
     def handle_show_reopen(ack, body, client):
         ack()
-        _send_category_detail(client, "reopen")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "reopen", user_id)
 
     @app.action("priority_show_treasury_spike")
     def handle_show_treasury_spike(ack, body, client):
         ack()
-        _send_category_detail(client, "treasury_spike")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "treasury_spike", user_id)
 
     @app.action("priority_show_underperforming_d30")
     def handle_show_underperforming_d30(ack, body, client):
         ack()
-        _send_category_detail(client, "underperforming_d30")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "underperforming_d30", user_id)
 
     @app.action("priority_show_underperforming_d60")
     def handle_show_underperforming_d60(ack, body, client):
         ack()
-        _send_category_detail(client, "underperforming_d60")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "underperforming_d60", user_id)
 
     @app.action("priority_show_multi_product")
     def handle_show_multi_product(ack, body, client):
         ack()
-        _send_category_detail(client, "multi_product")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "multi_product", user_id)
 
     # ── Smart Outreach Email Drafter ─────────────────────────────────
 
@@ -774,6 +796,7 @@ def register_interactive_handlers(app):
         to generate a relevant, personalized email.
         """
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -790,24 +813,24 @@ def register_interactive_handlers(app):
 
         if not account_id:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text="Could not identify the account — try `/gary-brief` instead.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Drafting outreach email for *{account_name}*... gathering context (~15 sec).",
         )
 
         def _run():
             with _draft_semaphore:
                 try:
-                    _draft_smart_email(account_id, account_name, opp_id, product, category, client)
+                    _draft_smart_email(account_id, account_name, opp_id, product, category, client, user_id=user_id)
                 except Exception as e:
                     logger.error("Outreach draft failed for %s: %s", account_name, e)
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"Failed to draft email for *{account_name}*: {e}",
                     )
 
@@ -819,6 +842,7 @@ def register_interactive_handlers(app):
     def handle_draft_reengage(ack, body, client):
         """Legacy re-engage handler — delegates to smart drafter."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -834,24 +858,24 @@ def register_interactive_handlers(app):
 
         if not account_id:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text="Could not identify the account — try `/gary-brief` instead.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Drafting re-engagement email for *{account_name}* ({product})... ~15 seconds.",
         )
 
         def _run():
             with _draft_semaphore:
                 try:
-                    _draft_smart_email(account_id, account_name, opp_id, product, "stale", client)
+                    _draft_smart_email(account_id, account_name, opp_id, product, "stale", client, user_id=user_id)
                 except Exception as e:
                     logger.error("Re-engage draft failed for %s: %s", account_name, e)
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"Failed to draft re-engage email for *{account_name}*: {e}",
                     )
 
@@ -867,6 +891,7 @@ def register_interactive_handlers(app):
         attendees/account and sends the result as a DM.
         """
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -880,13 +905,13 @@ def register_interactive_handlers(app):
 
         if not attendees:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=user_id,
                 text=f"No external attendees found for *{title}* — can't generate a brief.",
             )
             return
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f":briefcase: Generating brief for *{title}*... (~15 sec)",
         )
 
@@ -906,11 +931,11 @@ def register_interactive_handlers(app):
                     "description": "",
                     "organizer": "",
                 }
-                _process_meeting(meeting_data, client, force=True)
+                _process_meeting(meeting_data, client, force=True, user_id=user_id)
             except Exception as e:
                 logger.error("Home brief failed for %s: %s", title, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Brief generation failed for *{title}*: {e}",
                 )
 
@@ -922,6 +947,7 @@ def register_interactive_handlers(app):
     def handle_view_all(ack, body, client):
         """Expand a priority alert signal group beyond the 5-item limit."""
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         signal_type = action.get("action_id", "").replace("view_all_", "")
@@ -939,20 +965,20 @@ def register_interactive_handlers(app):
         header = signal_labels.get(signal_type, f"Priority Alerts — {signal_type}")
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f"Loading {header}...",
         )
 
         def _run():
             try:
                 from core.snowflake_client import run_query
-                from queries.queries import HOME_PRIORITY_ALERTS_QUERY
+                from queries.queries import HOME_PRIORITY_ALERTS_QUERY, format_query
                 import math
 
-                df = run_query(HOME_PRIORITY_ALERTS_QUERY)
+                df = run_query(format_query(HOME_PRIORITY_ALERTS_QUERY, user_id=user_id))
                 if df.empty:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text="No priority alert data available right now.",
                     )
                     return
@@ -960,7 +986,7 @@ def register_interactive_handlers(app):
                 filtered = df[df["signal_type"] == signal_type]
                 if filtered.empty:
                     client.chat_postMessage(
-                        channel=GREG_SLACK_ID,
+                        channel=user_id,
                         text=f"No {signal_type} signals found.",
                     )
                     return
@@ -1061,29 +1087,41 @@ def register_interactive_handlers(app):
                         "value": payload,
                     })
 
-                # Send in chunks (Slack limits blocks)
-                text = "\n".join(lines)
-                msg_blocks = [{
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": text[:3000]},
-                }]
-                # Add draft buttons in groups of 5
-                for i in range(0, len(buttons), 5):
-                    msg_blocks.append({
-                        "type": "actions",
-                        "elements": buttons[i:i+5],
-                    })
+                # Send in chunks — pair each account's detail line with its draft button
+                # Slack limits: 50 blocks per message, 3000 chars per text block
+                msg_blocks = [{"type": "header", "text": {"type": "plain_text", "text": header.replace("*", ""), "emoji": True}}]
 
-                client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
-                    blocks=msg_blocks,
-                    text=header,
-                )
+                # Pair each account line with its draft button inline
+                for idx, line_text in enumerate(lines[1:]):  # skip header line
+                    # Add the account detail as a section with the draft button as an accessory
+                    block = {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": line_text},
+                    }
+                    if idx < len(buttons):
+                        block["accessory"] = buttons[idx]
+                    msg_blocks.append(block)
+
+                    # Slack caps at 50 blocks per message — split if needed
+                    if len(msg_blocks) >= 49:
+                        client.chat_postMessage(
+                            channel=user_id,
+                            blocks=msg_blocks,
+                            text=header,
+                        )
+                        msg_blocks = []
+
+                if msg_blocks:
+                    client.chat_postMessage(
+                        channel=user_id,
+                        blocks=msg_blocks,
+                        text=header,
+                    )
 
             except Exception as e:
                 logger.error("View All failed for %s: %s", signal_type, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Failed to load full list: {e}",
                 )
 
@@ -1098,6 +1136,7 @@ def register_interactive_handlers(app):
         Triggers the Granola-first post-meeting flow for the selected meeting.
         """
         ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         action = body.get("actions", [{}])[0]
         value = action.get("value", "{}")
@@ -1110,18 +1149,18 @@ def register_interactive_handlers(app):
         attendees = payload.get("attendees", [])
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=user_id,
             text=f":memo: Running post-meeting analysis for *{title}*... (~20 sec)",
         )
 
         def _run():
             try:
                 from jobs.granola_followup import run_granola_followup
-                run_granola_followup(client, force=True)
+                run_granola_followup(client, user_id=user_id, force=True)
             except Exception as e:
                 logger.error("Home post-meeting failed for %s: %s", title, e)
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=user_id,
                     text=f"Post-meeting analysis failed for *{title}*: {e}",
                 )
 
@@ -1145,20 +1184,19 @@ def register_interactive_handlers(app):
         if not setting_key:
             return
 
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
         try:
             from utils.settings import get_setting, update_setting
-            current_val = get_setting(setting_key)
+            current_val = get_setting(setting_key, user_id=user_id)
             new_val = not current_val
-            update_setting(setting_key, new_val)
+            update_setting(setting_key, new_val, user_id=user_id)
 
             state_str = "ON" if new_val else "OFF"
-            logger.info("Setting %s toggled to %s", setting_key, state_str)
+            logger.info("Setting %s toggled to %s for user %s", setting_key, state_str, user_id)
         except Exception as e:
             logger.error("Failed to toggle setting %s: %s", setting_key, e)
             return
-
-        # Refresh the home tab
-        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
         def _refresh():
             try:
@@ -1181,9 +1219,10 @@ def register_interactive_handlers(app):
     @app.event("app_mention")
     def handle_app_mention(event, client, say):
         """Respond to @mentions in channels."""
+        from core.user_registry import is_registered
         user = event.get("user", "")
-        if user != GREG_SLACK_ID:
-            say("I only respond to Greg. :lock:")
+        if not is_registered(user):
+            say("You're not registered — open my Home tab to get started. :lock:")
             return
         say("Got it — I'm processing your request. I'll DM you with the results.")
 
@@ -1191,11 +1230,12 @@ def register_interactive_handlers(app):
 # ── Helper: send category detail ────────────────────────────────────────────
 
 
-def _send_category_detail(client, category: str):
+def _send_category_detail(client, category: str, user_id=None):
     """Send Level 2 detail blocks for a category."""
     from jobs.priority_actions import build_category_detail_blocks
 
-    blocks = build_category_detail_blocks(category)
+    dm_target = user_id or GREG_SLACK_ID
+    blocks = build_category_detail_blocks(category, user_id=user_id)
     _TITLES = {
         "close_now": "Close Now",
         "zero_to_one": "Zero-to-One",
@@ -1211,7 +1251,7 @@ def _send_category_detail(client, category: str):
     }
     title = _TITLES.get(category, category)
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text=f"Priority Actions — {title}",
     )
@@ -1220,7 +1260,7 @@ def _send_category_detail(client, category: str):
 # ── Smart Email Drafter ─────────────────────────────────────────────────────
 
 
-def _draft_smart_email(account_id, account_name, opp_id, product, category, client):
+def _draft_smart_email(account_id, account_name, opp_id, product, category, client, user_id=None):
     """Generate and send a context-aware outreach email draft.
 
     Works for any category (stale re-engage, zero-to-one outreach,
@@ -1230,6 +1270,10 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     3. Recent emails (direction, subject, body)
     4. Contact selection (prioritize people Greg has met with)
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+    first_name_owner = get_user_first_name(user_id)
+    booking_link = get_user_booking_link(user_id)
     from core.snowflake_client import run_query
     from core.claude_client import call_claude
     from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
@@ -1334,31 +1378,75 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
             parts.append(f"--- {call_name} ({call_date}) ---\n{summary}")
         gong_context = "\n\n".join(parts)
 
-    # Select best contact: prefer someone Greg has met with (in Gong)
-    contact_email = ""
-    contact_name = ""
-    contact_title = ""
-    for c in acct_contacts:
-        email = (c.get("email") or "").lower()
-        if email and email in gong_participants and not is_hash_like(c.get("name", "")):
-            contact_email = c["email"]
-            contact_name = c.get("name", "")
-            contact_title = c.get("title", "")
-            break
-    if not contact_email:
-        for c in acct_contacts:
-            if c.get("email") and not is_hash_like(c.get("name", "")):
-                contact_email = c["email"]
-                contact_name = c.get("name", "")
-                contact_title = c.get("title", "")
-                break
+    # ── 3. Smart contact selection: TO = best primary, CC = additional stakeholders ──
+    # Build engagement signals from emails and Gong
+    email_correspondents = set()
+    if emails_df is not None and not emails_df.empty:
+        for _, e in emails_df.iterrows():
+            ext_email = (str(e.get("external_contact_email", "") or "")).strip().lower()
+            if ext_email and "@" in ext_email:
+                email_correspondents.add(ext_email)
 
-    if not contact_email:
+    # Title-based classification
+    _OWNER_TITLES = re.compile(
+        r'\b(owner|ceo|president|founder|principal|cfo|vp.?finance|'
+        r'chief.?financial|controller|director.?of.?finance|managing.?partner|'
+        r'partner|dentist|doctor|physician|managing.?director)\b', re.IGNORECASE
+    )
+    _ADMIN_TITLES = re.compile(
+        r'\b(admin|administrator|ap.?manager|accounting.?manager|'
+        r'office.?manager|bookkeeper|accounts.?payable|billing|'
+        r'operations.?manager|finance.?manager|staff.?accountant|'
+        r'practice.?manager)\b', re.IGNORECASE
+    )
+
+    # Score each contact for ranking
+    def _contact_score(c):
+        """Higher = better candidate for TO. Returns (score, contact_dict)."""
+        email = (c.get("email") or "").strip().lower()
+        title = c.get("title") or ""
+        if not email or is_hash_like(c.get("name", "")):
+            return -1
+        score = 0
+        if _OWNER_TITLES.search(title):
+            score += 100  # business owner / decision-maker
+        if email in gong_participants:
+            score += 50   # met recently on a call
+        if email in email_correspondents:
+            score += 30   # recent email comms
+        if _ADMIN_TITLES.search(title):
+            score += 20   # admin / AP / finance
+        return score
+
+    scored = [(c, _contact_score(c)) for c in acct_contacts]
+    scored = [(c, s) for c, s in scored if s >= 0]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    if not scored:
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             text=f"No contact email found for *{account_name}*. Add a contact in Salesforce first.",
         )
         return
+
+    # TO = highest-scored contact
+    primary = scored[0][0]
+    contact_email = primary["email"]
+    contact_name = primary.get("name", "")
+    contact_title = primary.get("title", "")
+
+    # CC = all other SFDC contacts (up to 3), deduplicated by email.
+    # Always include owners + admins regardless of engagement score.
+    cc_contacts = []
+    seen_emails = {contact_email.lower()}
+    for c, s in scored[1:]:
+        em = c["email"].lower()
+        if em not in seen_emails:
+            cc_contacts.append(c)
+            seen_emails.add(em)
+        if len(cc_contacts) >= 3:
+            break
+    cc_string = ", ".join(c["email"] for c in cc_contacts)
 
     # Parse SFDC notes
     sfdc_notes = ""
@@ -1496,26 +1584,31 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     else:
         met_with_note = f"You have NOT met with {contact_name} before. This is a warm intro — reference the account context."
 
-    booking_link = BOOKING_LINK
-
-    # Determine opening based on whether Greg has met this contact
+    # Determine opening based on whether the owner has met this contact
     if contact_email.lower() in gong_participants:
         opening_instruction = (
-            f"Greg HAS met {first_name or contact_name} before. "
+            f"{first_name_owner} HAS met {first_name or contact_name} before. "
             f"Open with a natural reference to your prior conversation (e.g. 'Great connecting last time' or 'Following up from our call'). "
             f"Do NOT say 'great to meet you'."
         )
     else:
         opening_instruction = (
-            f"Greg has NOT met {first_name or contact_name} before. "
+            f"{first_name_owner} has NOT met {first_name or contact_name} before. "
             f"Open with: 'Hi {first_name or contact_name}, great to meet you! I was recently assigned as your Account Manager for the team and I wanted to reach out and make an intro.'"
         )
 
-    prompt = f"""You are helping {OWNER_NAME}, a Growth Account Manager at Ramp, {goal}.
+    cc_context = ""
+    if cc_contacts:
+        cc_names = ", ".join(
+            f"{c.get('name', '')} ({c.get('title', '')})" for c in cc_contacts
+        )
+        cc_context = f"\nCC'd: {cc_names}\nThis email will also CC additional stakeholders. Address the TO contact by name but write for a broader audience — avoid language that only makes sense to one person."
+
+    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, {goal}.
 
 Account: {account_name}
 Product: {product or 'Expansion'}
-Contact: {contact_name} ({contact_title})
+Contact: {contact_name} ({contact_title}){cc_context}
 
 SFDC Account Notes:
 {sfdc_notes if sfdc_notes else 'No notes on file'}
@@ -1532,7 +1625,7 @@ Competitors mentioned:
 Recent Email History:
 {email_comms if email_comms else 'No recent emails'}
 
-Write an email from Greg to {first_name or 'the contact'} following this EXACT structure:
+Write an email from {first_name_owner} to {first_name or 'the contact'} following this EXACT structure:
 
 1. OPENING: {opening_instruction}
 
@@ -1551,7 +1644,7 @@ Write an email from Greg to {first_name or 'the contact'} following this EXACT s
 
 4. CTA: "Feel free to select any time through <a href="{booking_link}">this link</a> or let me know when works for you, looking forward to it!"
 
-5. SIGN OFF: "Best,<br>{OWNER_FIRST_NAME}"
+5. SIGN OFF: "Best,<br>{first_name_owner}"
 
 Rules:
 - The context insert is the ONLY part that should vary per email. Keep it short (1-2 sentences).
@@ -1567,9 +1660,10 @@ Rules:
 
     # ── 6. Build HTML + send draft ──
     try:
-        from templates.signature import SIGNATURE_HTML
+        from templates.signature import build_signature
+        sig_html = build_signature(user_id=user_id)
     except ImportError:
-        SIGNATURE_HTML = ""
+        sig_html = ""
 
     # Find relevant help articles based on context
     from templates.help_links import find_relevant_links, format_links_for_email
@@ -1582,7 +1676,7 @@ Rules:
 {body_text}
 {f'<br>{links_html}' if links_html else ''}
 <br>
-{SIGNATURE_HTML}
+{sig_html}
 </div>"""
 
     # Pick Gmail label based on draft category
@@ -1598,7 +1692,9 @@ Rules:
             to=contact_email,
             subject=subject,
             html_body=html_body,
+            cc=cc_string,
             label=draft_label,
+            user_id=user_id,
         )
         if result["success"]:
             draft_id = result["draft_id"]
@@ -1609,10 +1705,11 @@ Rules:
         from utils.pending_drafts import save_draft as save_pending_draft
         draft_id = f"pending_{account_id}_{int(time.time())}"
         save_pending_draft(
-            draft_id=draft_id, to=contact_email, cc="",
+            draft_id=draft_id, to=contact_email, cc=cc_string,
             subject=subject, html_body=html_body,
             account_name=account_name,
             label=draft_label,
+            user_id=user_id or "",
         )
 
     # ── 7. Send confirmation DM ──
@@ -1631,11 +1728,31 @@ Rules:
     }
     drafter_type = _CATEGORY_LABELS.get(category, "Outreach")
 
-    met_note = " (met on Gong)" if contact_email.lower() in gong_participants else " (new contact)"
+    def _contact_tag(email, name, title):
+        """Build a display string with engagement signals."""
+        parts = []
+        if title:
+            parts.append(title)
+        if email.lower() in gong_participants:
+            parts.append("met on Gong")
+        if email.lower() in email_correspondents:
+            parts.append("recent emails")
+        tag = " · ".join(parts) if parts else "SFDC contact"
+        return f"{name} <{email}> — _{tag}_"
+
+    to_line = f"*To:* {_contact_tag(contact_email, contact_name, contact_title)}"
+    cc_line = ""
+    if cc_contacts:
+        cc_entries = [
+            _contact_tag(c["email"], c.get("name", ""), c.get("title", ""))
+            for c in cc_contacts
+        ]
+        cc_line = "\n*CC:* " + "\n       ".join(cc_entries)
+
     preview_text = re.sub(r'<br\s*/?>', '\n', body_text)
     preview_text = re.sub(r'<[^>]+>', '', preview_text)
     details = (
-        f"*To:* {contact_name} ({contact_email}){met_note}\n"
+        f"{to_line}{cc_line}\n"
         f"*Subject:* {subject}\n"
         f"*Account:* {account_name} — {product or 'Expansion'}\n\n"
         f"*Preview:*\n{preview_text[:500]}"
@@ -1648,7 +1765,7 @@ Rules:
         draft_id=draft_id,
     )
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text=f"{drafter_type} draft ready for {account_name}",
     )

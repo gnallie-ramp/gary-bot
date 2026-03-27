@@ -17,11 +17,11 @@ import pandas as pd
 
 from core.snowflake_client import run_query
 from core.slack_formatter import format_currency, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, NTR_RATES
 
 logger = logging.getLogger(__name__)
 
-ACTIVITY_QUERY = f"""
+ACTIVITY_QUERY_TEMPLATE = """
 WITH date_ranges AS (
     SELECT
         DATE_TRUNC('week', CURRENT_DATE)   AS week_start,
@@ -42,8 +42,8 @@ sqls_created AS (
     FROM analytics.marts.dim_sfdc_opportunities opp
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = opp.account_id
     WHERE opp.opportunity_type = 'Expansion'
-      AND opp.opportunity_owner = '{OWNER_NAME}'
-      AND opp.opportunity_stage_name NOT IN ('S0: Holding', 'S1: Discovery')
+      AND opp.opportunity_owner = '{owner_name}'
+      AND opp.opportunity_stage_name NOT IN ('S0: Holding', 'S1: Sales Accepted Opportunity')
       AND opp.expansion_subtype IN ('Card Expansion', 'Bill Pay Expansion', 'Travel Expansion', 'Treasury Expansion')
 ),
 -- Closed-won opps
@@ -65,7 +65,7 @@ closed_won AS (
     LEFT JOIN analytics.marts.agg_sfdc_expansion_opportunity_spend es ON es.opportunity_id = opp.opportunity_id
     WHERE opp.opportunity_is_won = TRUE
       AND opp.opportunity_type = 'Expansion'
-      AND opp.opportunity_owner = '{OWNER_NAME}'
+      AND opp.opportunity_owner = '{owner_name}'
       AND opp.expansion_subtype IN ('Card Expansion', 'Bill Pay Expansion', 'Travel Expansion', 'Treasury Expansion')
 )
 SELECT 'sql' AS metric_type,
@@ -102,10 +102,15 @@ def _safe_float(val, default=0.0):
         return default
 
 
-def run_activity_report(client, force: bool = False):
+def run_activity_report(client, user_id=None, force: bool = False):
     """Generate and send the activity report."""
+    from core.user_registry import get_user_sf_name
+
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id) if user_id else get_user_sf_name(GREG_SLACK_ID)
+
     try:
-        df = run_query(ACTIVITY_QUERY)
+        df = run_query(ACTIVITY_QUERY_TEMPLATE.format(owner_name=owner_name))
         if df.empty and not force:
             return
 
@@ -222,7 +227,7 @@ def run_activity_report(client, force: bool = False):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Activity Report: {sqls_month.get('Total', 0)} SQLs, {cws_month.get('Total', 0)} CWs this month",
         )
@@ -232,4 +237,4 @@ def run_activity_report(client, force: bool = False):
     except Exception as e:
         logger.error("Activity report failed: %s", e)
         if force:
-            client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Activity report failed: {e}")
+            client.chat_postMessage(channel=dm_target, text=f"Activity report failed: {e}")

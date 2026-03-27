@@ -15,14 +15,14 @@ import pandas as pd
 
 from core.snowflake_client import run_query
 from core.slack_formatter import format_currency, sf_account_url, sf_opp_url, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, NTR_RATES
 
 logger = logging.getLogger(__name__)
 
 
 # ── Spend pacing query: MTD vs same point last month + YoY ────────────────
 
-SPEND_PACING_QUERY = f"""
+SPEND_PACING_QUERY_TEMPLATE = """
 WITH greg_opps AS (
     SELECT
         opp.account_id, opp.opportunity_id, opp.expansion_subtype,
@@ -33,7 +33,7 @@ WITH greg_opps AS (
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = opp.account_id
     WHERE opp.opportunity_is_closed = FALSE
       AND opp.opportunity_type = 'Expansion'
-      AND opp.opportunity_owner = '{OWNER_NAME}'
+      AND opp.opportunity_owner = '{owner_name}'
       AND opp.opportunity_stage_name != 'S0: Holding'
       AND opp.expansion_subtype IN ('Card Expansion', 'Bill Pay Expansion', 'Travel Expansion', 'Treasury Expansion')
 ),
@@ -204,14 +204,19 @@ def _trajectory_icon(l7d, prev_7d):
         return "\U0001f4c9"  # declining
 
 
-def run_spend_pacing(client, force: bool = False):
+def run_spend_pacing(client, user_id=None, force: bool = False):
     """Generate and send the spend pacing intelligence report."""
+    from core.user_registry import get_user_sf_name
+
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id) if user_id else get_user_sf_name(GREG_SLACK_ID)
+
     try:
-        df = run_query(SPEND_PACING_QUERY)
+        df = run_query(SPEND_PACING_QUERY_TEMPLATE.format(owner_name=owner_name))
         if df.empty:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="No open opps with spend data found for pacing report.",
                 )
             return
@@ -338,7 +343,7 @@ def run_spend_pacing(client, force: bool = False):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Spend Pacing: {len(accelerating)} accelerating, {len(decelerating)} decelerating",
         )
@@ -347,4 +352,4 @@ def run_spend_pacing(client, force: bool = False):
     except Exception as e:
         logger.error("Spend pacing failed: %s", e)
         if force:
-            client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Spend pacing report failed: {e}")
+            client.chat_postMessage(channel=dm_target, text=f"Spend pacing report failed: {e}")

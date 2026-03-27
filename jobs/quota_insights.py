@@ -13,12 +13,11 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from config import GREG_SLACK_ID, DISPLAY_TIMEZONE, OWNER_NAME
-from core.gmail_client import fetch_looker_zip
+from core.gumstack_gmail import fetch_looker_zip
 
 logger = logging.getLogger(__name__)
 
 _TMP_DIR = "/tmp/gary_bot_looker"
-_GREG_NAME = OWNER_NAME
 
 
 # ── Parsing helpers ──────────────────────────────────────────────────────────
@@ -111,14 +110,14 @@ def _parse_wide_csv(filepath: str) -> Tuple[Dict[str, Dict[str, Dict[str, str]]]
     return data, periods_seen
 
 
-def _find_greg_row(csv_path: str) -> Optional[List[str]]:
-    """Find Greg's row in a standard CSV (first column = name). Returns the row or None."""
+def _find_greg_row(csv_path: str, owner_name: str = OWNER_NAME) -> Optional[List[str]]:
+    """Find the owner's row in a standard CSV (first column = name). Returns the row or None."""
     if not os.path.exists(csv_path):
         return None
     with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         for row in reader:
-            if row and row[0].strip() == _GREG_NAME:
+            if row and row[0].strip() == owner_name:
                 return row
     return None
 
@@ -215,8 +214,8 @@ def _fmt_pct(val: Optional[float]) -> str:
 
 # ── Team ranking ─────────────────────────────────────────────────────────────
 
-def _get_team_ranking(data: Dict, current_period: str) -> Tuple[Optional[int], int]:
-    """Get Greg's rank among all reps for current month realized CP attainment.
+def _get_team_ranking(data: Dict, current_period: str, owner_name: str = OWNER_NAME) -> Tuple[Optional[int], int]:
+    """Get the owner's rank among all reps for current month realized CP attainment.
 
     Returns (rank, total_reps). rank is 1-indexed. Returns (None, 0) if unavailable.
     """
@@ -233,15 +232,20 @@ def _get_team_ranking(data: Dict, current_period: str) -> Tuple[Optional[int], i
     reps.sort(key=lambda x: x[1], reverse=True)
     total = len(reps)
     for i, (name, _) in enumerate(reps):
-        if name == _GREG_NAME:
+        if name == owner_name:
             return i + 1, total
     return None, total
 
 
 # ── Main job ─────────────────────────────────────────────────────────────────
 
-def run_quota_insights(client):
+def run_quota_insights(client, user_id=None):
     """Pull Looker CSVs from Gmail and send daily quota pulse DM."""
+    from core.user_registry import get_user_sf_name
+
+    dm_target = user_id or GREG_SLACK_ID
+    _owner_name = get_user_sf_name(user_id) if user_id else get_user_sf_name(GREG_SLACK_ID)
+
     logger.info("Quota insights: starting...")
 
     # Clean up stale data
@@ -346,8 +350,8 @@ def run_quota_insights(client):
     if not current_realized_period and realized_periods:
         current_realized_period = realized_periods[-1]
 
-    greg_realized = realized_data.get(_GREG_NAME, {})
-    greg_renewal = renewal_data.get(_GREG_NAME, {})
+    greg_realized = realized_data.get(_owner_name, {})
+    greg_renewal = renewal_data.get(_owner_name, {})
 
     # ── Build monthly realized CP section ────────────────────────────────
     lines = []
@@ -377,7 +381,7 @@ def run_quota_insights(client):
         )
 
         # Team ranking
-        rank, total_reps = _get_team_ranking(realized_data, current_realized_period)
+        rank, total_reps = _get_team_ranking(realized_data, current_realized_period, _owner_name)
         if rank is not None:
             if rank == 1:
                 lines.append(":large_green_circle: #1 on team")
@@ -425,8 +429,8 @@ def run_quota_insights(client):
     lines.append("")
 
     # H1 Progress
-    greg_h1_realized = h1_realized_data.get(_GREG_NAME, {})
-    greg_h1_renewal = h1_renewal_data.get(_GREG_NAME, {})
+    greg_h1_realized = h1_realized_data.get(_owner_name, {})
+    greg_h1_renewal = h1_renewal_data.get(_owner_name, {})
     h1_lines = []
 
     if greg_h1_realized:
@@ -479,9 +483,9 @@ def run_quota_insights(client):
 
     # ── SQLs ─────────────────────────────────────────────────────────────
     sql_lines = []
-    greg_card_sql = card_sql_data.get(_GREG_NAME, {})
-    greg_bp_sql = bp_sql_data.get(_GREG_NAME, {})
-    greg_saas_sql = saas_sql_data.get(_GREG_NAME, {})
+    greg_card_sql = card_sql_data.get(_owner_name, {})
+    greg_bp_sql = bp_sql_data.get(_owner_name, {})
+    greg_saas_sql = saas_sql_data.get(_owner_name, {})
 
     # Card SQLs (monthly) — find current month
     card_sql_period = None
@@ -502,7 +506,7 @@ def run_quota_insights(client):
         sql_lines.append(f"{flag}Card: {total_opp:.0f} / {goal:.0f} ({_fmt_pct(attain)}){needs_attn}")
 
     # Bill Pay SQLs
-    bp_sql_period = _latest_period_with_data(bp_sql_data, _GREG_NAME, bp_sql_periods, current_month_label)
+    bp_sql_period = _latest_period_with_data(bp_sql_data, _owner_name, bp_sql_periods, current_month_label)
     if bp_sql_period and bp_sql_period in greg_bp_sql:
         bs = greg_bp_sql[bp_sql_period]
         total_opp = _parse_dollar(bs.get("Total Opp.", ""))
@@ -517,7 +521,7 @@ def run_quota_insights(client):
         sql_lines.append(f"BP ({period_label}): {total_opp:.0f} / {goal:.0f} ({_fmt_pct(attain)})")
 
     # SaaS SQLs
-    saas_sql_period = _latest_period_with_data(saas_sql_data, _GREG_NAME, saas_sql_periods, current_month_label)
+    saas_sql_period = _latest_period_with_data(saas_sql_data, _owner_name, saas_sql_periods, current_month_label)
     if saas_sql_period and saas_sql_period in greg_saas_sql:
         ss = greg_saas_sql[saas_sql_period]
         total_opp = _parse_dollar(ss.get("Total Opp.", ""))
@@ -538,17 +542,17 @@ def run_quota_insights(client):
 
     # ── CW CP ────────────────────────────────────────────────────────────
     cw_lines = []
-    greg_card_cw = card_cw_data.get(_GREG_NAME, {})
-    greg_bp_cw = bp_cw_data.get(_GREG_NAME, {})
-    greg_saas_cw = saas_cw_data.get(_GREG_NAME, {})
+    greg_card_cw = card_cw_data.get(_owner_name, {})
+    greg_bp_cw = bp_cw_data.get(_owner_name, {})
+    greg_saas_cw = saas_cw_data.get(_owner_name, {})
 
     def _extract_cw(data_dict, periods, label, hint=""):
         if not data_dict or not periods:
             return None
-        period = _latest_period_with_data(data_dict, _GREG_NAME, periods, hint)
-        if not period or period not in data_dict.get(_GREG_NAME, {}):
+        period = _latest_period_with_data(data_dict, _owner_name, periods, hint)
+        if not period or period not in data_dict.get(_owner_name, {}):
             return None
-        d = data_dict[_GREG_NAME][period]
+        d = data_dict[_owner_name][period]
         # Look for total/CP column and goal column
         total_val = 0.0
         goal_val = 0.0
@@ -588,17 +592,17 @@ def run_quota_insights(client):
 
     # ── CW Logos ─────────────────────────────────────────────────────────
     logo_parts = []
-    greg_card_logo = card_logo_data.get(_GREG_NAME, {})
-    greg_bp_logo = bp_logo_data.get(_GREG_NAME, {})
-    greg_saas_logo = saas_logo_data.get(_GREG_NAME, {})
+    greg_card_logo = card_logo_data.get(_owner_name, {})
+    greg_bp_logo = bp_logo_data.get(_owner_name, {})
+    greg_saas_logo = saas_logo_data.get(_owner_name, {})
 
     def _extract_logo(data_dict, periods, label, hint=""):
         if not data_dict or not periods:
             return None
-        period = _latest_period_with_data(data_dict, _GREG_NAME, periods, hint)
-        if not period or period not in data_dict.get(_GREG_NAME, {}):
+        period = _latest_period_with_data(data_dict, _owner_name, periods, hint)
+        if not period or period not in data_dict.get(_owner_name, {}):
             return None
-        d = data_dict[_GREG_NAME][period]
+        d = data_dict[_owner_name][period]
         total_val = 0.0
         goal_val = 0.0
         attain_val = None
@@ -671,7 +675,7 @@ def run_quota_insights(client):
         def _check_metric(label, data_dict, period, metric_name="% Attainment"):
             if not data_dict or not period:
                 return
-            greg_d = data_dict.get(_GREG_NAME, {})
+            greg_d = data_dict.get(_owner_name, {})
             if period in greg_d:
                 attain = _parse_pct(greg_d[period].get(metric_name, ""))
                 if attain is not None and attain < 50:
@@ -688,7 +692,7 @@ def run_quota_insights(client):
 
     try:
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             text=message,
             mrkdwn=True,
         )

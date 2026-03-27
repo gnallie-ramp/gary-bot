@@ -19,7 +19,7 @@ import pandas as pd
 from core.snowflake_client import run_query
 from core.slack_formatter import format_currency, sf_opp_url, sf_account_url, dashboard_url
 from config import GREG_SLACK_ID, NTR_RATES
-from queries.queries import REALIZED_CP_QUERY
+from queries.queries import REALIZED_CP_QUERY, format_query
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +54,15 @@ def _status_classify(current_l30d, baseline):
         return "inactive", "\u26aa", "No spend post-close"
 
 
-def run_post_close_monitor(client, force: bool = False):
+def run_post_close_monitor(client, user_id=None, force: bool = False):
     """Check all CW opps and send alerts for significant status changes."""
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
-        df = run_query(REALIZED_CP_QUERY)
+        df = run_query(format_query(REALIZED_CP_QUERY, user_id=user_id))
         if df.empty:
             if force:
-                client.chat_postMessage(channel=GREG_SLACK_ID, text="No closed-won opps to monitor.")
+                client.chat_postMessage(channel=dm_target, text="No closed-won opps to monitor.")
             return
 
         # Classify each opp
@@ -178,7 +180,7 @@ def run_post_close_monitor(client, force: bool = False):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Post-Close Monitor: {len(exceeding)} exceeding, {len(crossed)} crossed, {len(inactive)} inactive",
         )
@@ -188,4 +190,4 @@ def run_post_close_monitor(client, force: bool = False):
     except Exception as e:
         logger.error("Post-close monitor failed: %s", e)
         if force:
-            client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Post-close monitor failed: {e}")
+            client.chat_postMessage(channel=dm_target, text=f"Post-close monitor failed: {e}")

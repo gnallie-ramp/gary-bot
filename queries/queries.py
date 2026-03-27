@@ -2844,9 +2844,13 @@ ORDER BY
 """
 
 # ── Auto-parameterize owner name in all queries ──────────────────────────────
-# Replaces hardcoded 'Gregory Nallie' with the configured OWNER_NAME so
-# teammates can clone the repo, set OWNER_NAME in .env, and get their own data.
+# Replaces hardcoded 'Gregory Nallie' with a sentinel so queries can be
+# resolved per-user at runtime via format_query().
 import sys as _sys
+
+_OWNER_SENTINEL = "__OWNER__"
+_EMAIL_SENTINEL = "__OWNER_EMAIL__"
+
 
 def _parameterize_queries():
     module = _sys.modules[__name__]
@@ -2854,8 +2858,38 @@ def _parameterize_queries():
         if not name.endswith("_QUERY"):
             continue
         val = getattr(module, name)
-        if isinstance(val, str) and "Gregory Nallie" in val:
-            setattr(module, name, val.replace("Gregory Nallie", _OWNER_NAME))
+        if isinstance(val, str):
+            changed = False
+            if "Gregory Nallie" in val:
+                val = val.replace("Gregory Nallie", _OWNER_SENTINEL)
+                changed = True
+            if "gnallie@ramp.com" in val:
+                val = val.replace("gnallie@ramp.com", _EMAIL_SENTINEL)
+                changed = True
+            if changed:
+                setattr(module, name, val)
+
 
 _parameterize_queries()
 del _parameterize_queries
+
+
+def format_query(query: str, user_id: str = None, **kwargs) -> str:
+    """Format a query with the calling user's identity.
+
+    Replaces the __OWNER__ sentinel with the user's Salesforce name and the
+    __OWNER_EMAIL__ sentinel with the user's email, then applies any additional
+    str.format() kwargs (search_term, lookback_days, etc.).
+    Falls back to config OWNER_NAME / GMAIL_ADDRESS if user_id is None or unregistered.
+    """
+    from core.user_registry import get_user
+    from config import OWNER_NAME, GMAIL_ADDRESS
+
+    user = get_user(user_id) if user_id else None
+    owner_name = user["sf_owner_name"] if user else OWNER_NAME
+    owner_email = user["email"] if user else (GMAIL_ADDRESS or "")
+    result = query.replace(_OWNER_SENTINEL, owner_name)
+    result = result.replace(_EMAIL_SENTINEL, owner_email)
+    if kwargs:
+        result = result.format(**kwargs)
+    return result

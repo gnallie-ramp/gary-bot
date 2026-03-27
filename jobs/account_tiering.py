@@ -20,17 +20,17 @@ import pandas as pd
 
 from core.snowflake_client import run_query
 from core.slack_formatter import format_currency, sf_account_url, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES, OWNER_NAME
+from config import GMAIL_ADDRESS, GREG_SLACK_ID, NTR_RATES
 
 logger = logging.getLogger(__name__)
 
-TIERING_QUERY = f"""
+TIERING_QUERY_TEMPLATE = """
 WITH greg_accounts AS (
     SELECT DISTINCT ledger.account_id, sa.account_name, sa.business_id
     FROM analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
     JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = ledger.account_id
     WHERE ledger.date_day = CURRENT_DATE - 1
-      AND ledger.owner_name = '{OWNER_NAME}'
+      AND ledger.owner_name = '{owner_name}'
 ),
 spend AS (
     SELECT
@@ -66,7 +66,7 @@ open_opps AS (
     FROM analytics.marts.dim_sfdc_opportunities
     WHERE opportunity_is_closed = FALSE
       AND opportunity_type = 'Expansion'
-      AND opportunity_owner = '{OWNER_NAME}'
+      AND opportunity_owner = '{owner_name}'
       AND opportunity_stage_name != 'S0: Holding'
     GROUP BY account_id, expansion_subtype
 ),
@@ -75,7 +75,7 @@ recent_cw AS (
     FROM analytics.marts.dim_sfdc_opportunities
     WHERE opportunity_is_won = TRUE
       AND opportunity_type = 'Expansion'
-      AND opportunity_owner = '{OWNER_NAME}'
+      AND opportunity_owner = '{owner_name}'
       AND opportunity_close_date >= CURRENT_DATE - 90
 ),
 engagement AS (
@@ -95,7 +95,7 @@ email_engagement AS (
         ga.account_id,
         COUNT(CASE WHEN e.sfdc_email_created_at >= CURRENT_DATE - 30 THEN 1 END) AS emails_l30d,
         COUNT(CASE WHEN e.sfdc_email_created_at >= CURRENT_DATE - 30
-                    AND e.sfdc_email_owner_email = 'gnallie@ramp.com' THEN 1 END) AS greg_emails_l30d,
+                    AND e.sfdc_email_owner_email = '{owner_email}' THEN 1 END) AS owner_emails_l30d,
         COUNT(DISTINCT e.sfdc_email_owner_email) AS ramp_senders,
         COUNT(CASE WHEN e.has_painpoints THEN 1 END) AS painpoint_mentions,
         COUNT(CASE WHEN e.has_interested THEN 1 END) AS interest_signals,
@@ -210,13 +210,19 @@ def _score_account(row) -> tuple[float, list[str]]:
     return score, reasons
 
 
-def run_account_tiering(client, force: bool = False):
+def run_account_tiering(client, user_id=None, force: bool = False):
     """Generate and send the Top 50 focus list ranked by CP potential."""
+    from core.user_registry import get_user_email, get_user_sf_name
+
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id) if user_id else get_user_sf_name(GREG_SLACK_ID)
+    owner_email = get_user_email(user_id) if user_id else (GMAIL_ADDRESS or get_user_email(GREG_SLACK_ID))
+
     try:
-        df = run_query(TIERING_QUERY)
+        df = run_query(TIERING_QUERY_TEMPLATE.format(owner_name=owner_name, owner_email=owner_email))
         if df.empty:
             if force:
-                client.chat_postMessage(channel=GREG_SLACK_ID, text="No accounts with spend data found.")
+                client.chat_postMessage(channel=dm_target, text="No accounts with spend data found.")
             return
 
         # Score all accounts
@@ -301,7 +307,7 @@ def run_account_tiering(client, force: bool = False):
         })
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Top {len(top)} Focus Accounts — {format_currency(total_potential)} CP potential",
         )
@@ -310,4 +316,4 @@ def run_account_tiering(client, force: bool = False):
     except Exception as e:
         logger.error("Account tiering failed: %s", e)
         if force:
-            client.chat_postMessage(channel=GREG_SLACK_ID, text=f"Account tiering failed: {e}")
+            client.chat_postMessage(channel=dm_target, text=f"Account tiering failed: {e}")

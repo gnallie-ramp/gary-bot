@@ -25,40 +25,65 @@ _SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
 
-# ── Cached service ────────────────────────────────────────────────────────────
-_calendar_service = None
+# ── Cached services (per-user) ────────────────────────────────────────────────
+_calendar_services: dict = {}  # user_id -> service object (None key = ADC default)
 _api_available = None  # type: Optional[bool]
 
 
-def _get_service():
-    """Get an authenticated Calendar API service, caching across calls."""
-    global _calendar_service, _api_available
+def _get_service(user_id=None):
+    """Get an authenticated Calendar API service, caching per user.
 
-    if _calendar_service is not None:
-        return _calendar_service
+    If a per-user credential file exists at
+    ``~/.gary_bot_tokens/<user_id>/calendar_credentials.json``, it is used.
+    Otherwise falls back to Application Default Credentials (ADC).
+    """
+    global _api_available
+
+    cache_key = user_id  # None = default ADC
+
+    if cache_key in _calendar_services:
+        return _calendar_services[cache_key]
 
     try:
-        creds, _ = default(scopes=_SCOPES)
+        import os
+
+        creds = None
+        # Try per-user credentials first
+        if user_id:
+            user_creds_path = os.path.expanduser(
+                f"~/.gary_bot_tokens/{user_id}/calendar_credentials.json"
+            )
+            if os.path.exists(user_creds_path):
+                from google.oauth2.credentials import Credentials as OAuth2Credentials
+                creds = OAuth2Credentials.from_authorized_user_file(
+                    user_creds_path, _SCOPES
+                )
+
+        # Fall back to ADC
+        if creds is None:
+            creds, _ = default(scopes=_SCOPES)
+
         if not creds.valid and hasattr(creds, "refresh"):
             creds.refresh(Request())
 
-        _calendar_service = build("calendar", "v3", credentials=creds)
+        service = build("calendar", "v3", credentials=creds)
+        _calendar_services[cache_key] = service
         _api_available = True
-        return _calendar_service
+        return service
     except Exception as e:
         _api_available = False
-        logger.warning("Google Calendar API init failed: %s", e)
+        logger.warning("Google Calendar API init failed (user=%s): %s", user_id, e)
         raise
 
 
 # ── Connection check ──────────────────────────────────────────────────────────
 
 
-def check_connection():
+def check_connection(user_id=None):
     """Test Calendar API connectivity. Returns (ok, message)."""
     global _api_available
     try:
-        service = _get_service()
+        service = _get_service(user_id=user_id)
         cal = service.calendarList().get(calendarId="primary").execute()
         _api_available = True
         return True, f"OK — {cal.get('summary', 'connected')}"
@@ -74,6 +99,7 @@ def get_upcoming_meetings(
     days_ahead=7,
     max_results=30,
     calendar_id="primary",
+    user_id=None,
 ):
     """Fetch upcoming calendar events that look like customer meetings.
 
@@ -87,7 +113,7 @@ def get_upcoming_meetings(
         return []
 
     try:
-        service = _get_service()
+        service = _get_service(user_id=user_id)
     except Exception:
         return []
 
@@ -167,7 +193,7 @@ def get_upcoming_meetings(
         return []
 
 
-def get_todays_meetings(max_results=15, calendar_id="primary"):
+def get_todays_meetings(max_results=15, calendar_id="primary", user_id=None):
     """Fetch ALL of today's meetings (past AND future) in US/Eastern time.
 
     Returns the same format as get_upcoming_meetings, plus an `already_happened`
@@ -178,7 +204,7 @@ def get_todays_meetings(max_results=15, calendar_id="primary"):
         return []
 
     try:
-        service = _get_service()
+        service = _get_service(user_id=user_id)
     except Exception:
         return []
 
@@ -266,14 +292,14 @@ def get_todays_meetings(max_results=15, calendar_id="primary"):
         return []
 
 
-def get_meetings_in_range(start_dt, end_dt, calendar_id="primary"):
+def get_meetings_in_range(start_dt, end_dt, calendar_id="primary", user_id=None):
     """Fetch meetings between two datetime objects. For post-meeting detection."""
     global _api_available
     if _api_available is False:
         return []
 
     try:
-        service = _get_service()
+        service = _get_service(user_id=user_id)
     except Exception:
         return []
 
@@ -368,7 +394,7 @@ def extract_external_attendees(meeting):
     return external
 
 
-def match_meeting_to_account(meeting, account_cache=None):
+def match_meeting_to_account(meeting, account_cache=None, user_id=None):
     """Try to match a calendar meeting to an SFDC account.
 
     Uses the unified match_account() with open-opp tiebreaker.
@@ -402,6 +428,7 @@ def match_meeting_to_account(meeting, account_cache=None):
             result = match_account(
                 account_name=clean_title or "",
                 participant_emails=ext_emails,
+                user_id=user_id,
             )
             if result.matched:
                 source = "attendee_domain" if ext_emails else "title"

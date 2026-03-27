@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ── Account lookup ────────────────────────────────────────────────────────
 
 
-def resolve_account_name(conn, business_name: str) -> dict | None:
+def resolve_account_name(conn, business_name: str, user_id: str | None = None) -> dict | None:
     """Search ``dim_sfdc_accounts`` for an account whose name matches
     *business_name* (case-insensitive LIKE).
 
@@ -29,6 +29,9 @@ def resolve_account_name(conn, business_name: str) -> dict | None:
     """
     if not business_name or not business_name.strip():
         return None
+
+    from core.user_registry import get_user_sf_name
+    owner_name = get_user_sf_name(user_id) if user_id else OWNER_NAME
 
     safe_name = business_name.strip().replace("'", "''")
 
@@ -42,7 +45,7 @@ def resolve_account_name(conn, business_name: str) -> dict | None:
           SELECT DISTINCT account_id
           FROM analytics.agg.agg_sfdc__daily_account_owner_ledger
           WHERE date_day = CURRENT_DATE - 1
-            AND owner_name = '{OWNER_NAME}'
+            AND owner_name = '{owner_name}'
       )
     LIMIT 1
     """
@@ -60,7 +63,7 @@ def resolve_account_name(conn, business_name: str) -> dict | None:
                   SELECT DISTINCT account_id
                   FROM analytics.agg.agg_sfdc__daily_account_owner_ledger
                   WHERE date_day = CURRENT_DATE - 1
-                    AND owner_name = '{OWNER_NAME}'
+                    AND owner_name = '{owner_name}'
               )
               AND JAROWINKLER_SIMILARITY(LOWER(sa.account_name), LOWER('{safe_name}')) >= 70
             ORDER BY score DESC

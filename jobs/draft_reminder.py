@@ -1,9 +1,9 @@
-"""Scheduled job: remind Greg about unsent Claude Drafts and stale auto-drafts.
+"""Scheduled job: remind about unsent Claude Drafts and stale auto-drafts.
 
-Checks Gmail via IMAP for drafts labeled under "Claude Drafts/*" that are
-older than a configurable threshold.  Cross-references with sent mail to
-auto-delete duplicates (if Greg already sent a follow-up to the same
-recipient).  For genuinely unsent drafts, DMs Greg with escalating urgency.
+Checks Gmail via Gumstack MCP for drafts labeled under "Claude Drafts/*" that
+are older than a configurable threshold. Cross-references with sent mail to
+auto-detect duplicates (if the user already sent a follow-up to the same
+recipient). For genuinely unsent drafts, DMs with escalating urgency.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 
 from config import GREG_SLACK_ID
-from core.gmail_client import search_emails, search_drafts, _imap_search
+from core.gumstack_gmail import read_emails
 
 logger = logging.getLogger(__name__)
 
@@ -24,58 +24,39 @@ _URGENT_HOURS = 48
 
 # Don't remind about the same draft more than once per 4 hours
 _REMIND_COOLDOWN = 4 * 3600
-_last_reminded: dict[str, float] = {}
+_last_reminded: dict[tuple[str, str], float] = {}
 
 
-def _get_claude_drafts():
-    """Fetch drafts from Claude Drafts/* labels via IMAP.
+def _get_claude_drafts(user_id=None):
+    """Fetch drafts from Claude Drafts/* labels via Gumstack MCP.
 
     Returns list of dicts with subject, to_addr, date, label.
     """
-    import imaplib
-    import email
-    from config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD
-
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
-        return []
-
     try:
-        conn = imaplib.IMAP4_SSL("imap.gmail.com")
-        conn.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        conn.select("[Gmail]/Drafts", readonly=True)
-
-        # Search for all drafts
-        status, data = conn.search(None, "ALL")
-        if status != "OK" or not data[0]:
-            conn.logout()
+        # Search for drafts with Claude-generated subjects
+        drafts_raw = read_emails(
+            'in:drafts (subject:"Ramp Follow-Up" OR subject:"Claude Draft")',
+            max_results=50,
+            user_id=user_id,
+        )
+        if not drafts_raw:
             return []
 
-        msg_ids = data[0].split()
-        # Most recent first, limit to 50
-        msg_ids = list(reversed(msg_ids[-50:]))
-
         drafts = []
-        for mid in msg_ids:
-            status, msg_data = conn.fetch(mid, "(RFC822.HEADER)")
-            if status != "OK" or not msg_data[0]:
-                continue
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
-
-            subject = msg.get("Subject", "")
-            to_addr = msg.get("To", "")
-            date_str = msg.get("Date", "")
+        for em in drafts_raw:
+            subject = em.get("subject", "")
+            to_addr = em.get("to", "")
+            date_str = em.get("date", "")
 
             # Only include Claude-generated follow-up drafts
             if "Ramp Follow-Up" in subject or "Claude Draft" in subject:
                 drafts.append({
-                    "id": mid.decode(),
+                    "id": em.get("id", ""),
                     "subject": subject,
                     "to_addr": to_addr,
                     "date": date_str,
                 })
 
-        conn.logout()
         return drafts
 
     except Exception as e:
@@ -83,8 +64,8 @@ def _get_claude_drafts():
         return []
 
 
-def _check_if_already_sent(to_addr, subject_keywords, days=7):
-    """Check sent mail to see if Greg already sent a similar email.
+def _check_if_already_sent(to_addr, subject_keywords, days=7, user_id=None):
+    """Check sent mail to see if the user already sent a similar email.
 
     Returns True if a matching sent email was found.
     """
@@ -95,18 +76,16 @@ def _check_if_already_sent(to_addr, subject_keywords, days=7):
     match = re.search(r"<([^>]+)>", to_addr)
     addr = match.group(1).lower() if match else to_addr.strip().lower()
 
-    sent_emails = search_emails(
-        contact_emails=[addr],
-        days=days,
+    sent_emails = read_emails(
+        f"from:me to:{addr} newer_than:{days}d",
         max_results=10,
+        user_id=user_id,
     )
 
     for em in sent_emails:
-        if em["direction"] == "outbound":
-            # Check for subject overlap
-            sent_subj = em.get("subject", "").lower()
-            if any(kw.lower() in sent_subj for kw in subject_keywords):
-                return True
+        sent_subj = em.get("subject", "").lower()
+        if any(kw.lower() in sent_subj for kw in subject_keywords):
+            return True
 
     return False
 
@@ -124,13 +103,15 @@ def _estimate_draft_age_hours(date_str):
         return 0
 
 
-def run_draft_reminder(client) -> None:
-    """Check for unsent Claude Drafts and remind Greg.
+def run_draft_reminder(client, user_id=None) -> None:
+    """Check for unsent Claude Drafts and remind the user.
 
     Also auto-flags drafts where a follow-up was already sent manually.
     """
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
-        drafts = _get_claude_drafts()
+        drafts = _get_claude_drafts(user_id=user_id)
         if not drafts:
             logger.info("Draft reminder: no Claude drafts found.")
             return
@@ -149,7 +130,7 @@ def run_draft_reminder(client) -> None:
                 continue
 
             # Check if already reminded recently
-            draft_key = f"{to_addr}_{subject}"
+            draft_key = (dm_target, f"{to_addr}_{subject}")
             if now - _last_reminded.get(draft_key, 0) < _REMIND_COOLDOWN:
                 continue
 
@@ -157,7 +138,7 @@ def run_draft_reminder(client) -> None:
             keywords = [w for w in subject.replace("-", " ").split()
                         if len(w) > 3 and w.lower() not in ("ramp", "follow", "up")]
 
-            if _check_if_already_sent(to_addr, keywords):
+            if _check_if_already_sent(to_addr, keywords, user_id=user_id):
                 already_sent.append(draft)
             else:
                 # Determine urgency
@@ -199,13 +180,13 @@ def run_draft_reminder(client) -> None:
         message = "\n".join(lines)
 
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             text=message,
         )
 
         # Update cooldowns
         for d in unsent:
-            draft_key = f"{d['to_addr']}_{d['subject']}"
+            draft_key = (dm_target, f"{d['to_addr']}_{d['subject']}")
             _last_reminded[draft_key] = now
 
         logger.info("Draft reminder sent: %d unsent, %d already sent.", len(unsent), len(already_sent))

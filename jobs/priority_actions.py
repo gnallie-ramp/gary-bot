@@ -36,7 +36,7 @@ import pandas as pd
 from queries.queries import (
     HOME_PRIORITY_ALERTS_QUERY, POST_MEETING_CALLS_QUERY,
     STALE_OPPS_QUERY, REOPEN_QUERY, RECENT_CW_BY_PRODUCT_QUERY,
-    POST_CLOSE_CHECKPOINT_QUERY,
+    POST_CLOSE_CHECKPOINT_QUERY, format_query,
 )
 from core.snowflake_client import run_query
 from core.slack_formatter import (
@@ -51,15 +51,16 @@ MAX_PER_CATEGORY = 10
 
 # Stages considered "invested" — S2+ means work has been done, worth re-engaging
 _STAGE_ORDER = {
-    "S1: Discovery": 1,
-    "S2: Scoping": 2,
-    "S3: Validation": 3,
-    "S4: Negotiation": 4,
+    "S1: Sales Accepted Opportunity": 1,
+    "S2: Sales Qualified Opportunity": 2,
+    "S3: Securing Technical Win": 3,
+    "S4: Securing Business Win": 4,
+    "S5: Finalizing Closure": 5,
 }
 
-# In-memory cache for drill-down (cleared on each /priorities run)
-_cached_actions: dict[str, list[dict]] = {}
-_cache_ts: float = 0.0
+# In-memory cache for drill-down, keyed by user_id (cleared on each /priorities run)
+_cached_actions: dict[str, dict[str, list[dict]]] = {}
+_cache_ts: dict[str, float] = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
@@ -104,14 +105,14 @@ def _presale_detail(row):
     return f"AE presale: {format_currency(presale)}/mo"
 
 
-def _gather_alert_signals() -> list[dict]:
+def _gather_alert_signals(user_id: str = None) -> list[dict]:
     """All spend/acceleration signals from HOME_PRIORITY_ALERTS_QUERY.
 
     Returns items for: early_accel, close_window, close_now, leading,
     first_bill, zero_to_one, sustained_accel.
     """
     try:
-        df = run_query(HOME_PRIORITY_ALERTS_QUERY)
+        df = run_query(format_query(HOME_PRIORITY_ALERTS_QUERY, user_id=user_id))
         if df.empty:
             return []
 
@@ -257,14 +258,14 @@ def _gather_alert_signals() -> list[dict]:
         return []
 
 
-def _gather_checkpoint_signals() -> list[dict]:
+def _gather_checkpoint_signals(user_id: str = None) -> list[dict]:
     """D30/D60 post-close activation checkpoints.
 
     Finds CW opps at D30 (days 25-35) and D60 (days 55-65) where
     actual spend is below 80% of target SOW pace.
     """
     try:
-        df = run_query(POST_CLOSE_CHECKPOINT_QUERY)
+        df = run_query(format_query(POST_CLOSE_CHECKPOINT_QUERY, user_id=user_id))
         if df.empty:
             return []
 
@@ -339,10 +340,10 @@ def _gather_checkpoint_signals() -> list[dict]:
         return []
 
 
-def _gather_missing_followups(lookback_days: int = 7) -> list[dict]:
+def _gather_missing_followups(lookback_days: int = 7, user_id: str = None) -> list[dict]:
     """Gong calls missing follow-up emails."""
     try:
-        df = run_query(POST_MEETING_CALLS_QUERY.format(lookback_days=lookback_days))
+        df = run_query(format_query(POST_MEETING_CALLS_QUERY, user_id=user_id, lookback_days=lookback_days))
         if df.empty:
             return []
 
@@ -379,7 +380,7 @@ def _gather_missing_followups(lookback_days: int = 7) -> list[dict]:
         return []
 
 
-def _gather_post_meeting_opps(lookback_days: int = 14) -> list[dict]:
+def _gather_post_meeting_opps(lookback_days: int = 14, user_id: str = None) -> list[dict]:
     """Detect Gong calls where expansion products were discussed but no opp exists.
 
     Deduplicates against:
@@ -387,14 +388,14 @@ def _gather_post_meeting_opps(lookback_days: int = 14) -> list[dict]:
       - Recently closed-won opps (last 90 days) for the same account + product type
     """
     try:
-        df = run_query(POST_MEETING_CALLS_QUERY.format(lookback_days=lookback_days))
+        df = run_query(format_query(POST_MEETING_CALLS_QUERY, user_id=user_id, lookback_days=lookback_days))
         if df.empty:
             return []
 
         # Build dedup set: (account_id, product) for recently CW opps
         recent_cw = set()
         try:
-            cw_df = run_query(RECENT_CW_BY_PRODUCT_QUERY)
+            cw_df = run_query(format_query(RECENT_CW_BY_PRODUCT_QUERY, user_id=user_id))
             for _, row in cw_df.iterrows():
                 recent_cw.add((row["account_id"], row["expansion_subtype"]))
         except Exception:
@@ -484,10 +485,10 @@ def _gather_post_meeting_opps(lookback_days: int = 14) -> list[dict]:
         return []
 
 
-def _gather_stale_opps() -> list[dict]:
+def _gather_stale_opps(user_id: str = None) -> list[dict]:
     """S2+ stale opps ranked by CP value with meeting/email context."""
     try:
-        df = run_query(STALE_OPPS_QUERY)
+        df = run_query(format_query(STALE_OPPS_QUERY, user_id=user_id))
         if df.empty:
             return []
 
@@ -499,6 +500,11 @@ def _gather_stale_opps() -> list[dict]:
             if stage_rank < 2:
                 continue
 
+            days_since = int(_safe_float(row.get("days_since_last_touch")))
+            # Skip opps with no real touch history (2000-01-01 default = ~9500d)
+            if days_since > 365:
+                continue
+
             product = row.get("expansion_subtype", "")
             ntr = NTR_RATES.get(product, 0.0095)
             baseline = _safe_float(row.get("baseline_spend"))
@@ -506,7 +512,6 @@ def _gather_stale_opps() -> list[dict]:
             over_baseline = max(0, recent - baseline)
             est_cp = over_baseline * ntr * 3
 
-            days_since = int(_safe_float(row.get("days_since_last_touch")))
             days_open = int(_safe_float(row.get("days_open")))
 
             cp_score = min(50, est_cp / 50) if est_cp > 0 else min(20, recent * ntr * 3 / 50)
@@ -649,10 +654,10 @@ def _classify_reopen_pattern(row) -> tuple:
     return "never_activated", est_cp
 
 
-def _gather_reopen_opps() -> list[dict]:
+def _gather_reopen_opps(user_id: str = None) -> list[dict]:
     """Closed-won opps 60-120 days ago with spend patterns worth re-opening."""
     try:
-        df = run_query(REOPEN_QUERY)
+        df = run_query(format_query(REOPEN_QUERY, user_id=user_id))
         if df.empty:
             return []
 
@@ -760,11 +765,12 @@ def _group_by_type(all_items: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
-def get_cached_category(category: str) -> list[dict]:
+def get_cached_category(category: str, user_id: str = None) -> list[dict]:
     """Retrieve cached items for a category (used by interactive handlers)."""
-    if time.time() - _cache_ts > _CACHE_TTL:
+    uid = user_id or GREG_SLACK_ID
+    if time.time() - _cache_ts.get(uid, 0) > _CACHE_TTL:
         return []
-    return _cached_actions.get(category, [])
+    return _cached_actions.get(uid, {}).get(category, [])
 
 
 # ── Level 1: Summary card ───────────────────────────────────────────────────
@@ -1003,12 +1009,12 @@ def _build_summary_blocks(date_str: str, groups: dict[str, list[dict]]) -> list[
 # ── Level 2: Category detail blocks ─────────────────────────────────────────
 
 
-def build_category_detail_blocks(category: str) -> list[dict]:
+def build_category_detail_blocks(category: str, user_id: str = None) -> list[dict]:
     """Build Level 2 detail blocks for a specific category.
 
     Called by interactive handlers when user clicks a category button.
     """
-    items = get_cached_category(category)
+    items = get_cached_category(category, user_id=user_id)
     if not items:
         return [{
             "type": "section",
@@ -1167,7 +1173,7 @@ def build_category_detail_blocks(category: str) -> list[dict]:
         "zero_to_one", "sustained_accel", "treasury_spike",
         "underperforming_d60", "underperforming_d30", "multi_product",
         "followup", "post_meeting_opp", "stale", "reopen",
-    ] if c != category and get_cached_category(c)]
+    ] if c != category and get_cached_category(c, user_id=user_id)]
     if next_categories:
         _LABELS = {
             "early_accel": "`early accel`",
@@ -1201,7 +1207,7 @@ def build_category_detail_blocks(category: str) -> list[dict]:
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 
-def run_priority_actions(client, force: bool = False, silent: bool = False):
+def run_priority_actions(client, user_id=None, force: bool = False, silent: bool = False):
     """Generate and send the Level 1 priority summary DM.
 
     Parameters
@@ -1215,17 +1221,19 @@ def run_priority_actions(client, force: bool = False, silent: bool = False):
     """
     global _cached_actions, _cache_ts
 
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
         all_items = []
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
-                executor.submit(_gather_alert_signals): "alerts",
-                executor.submit(_gather_checkpoint_signals): "checkpoints",
-                executor.submit(_gather_missing_followups, 7): "followups",
-                executor.submit(_gather_post_meeting_opps, 14): "post_meeting_opp",
-                executor.submit(_gather_stale_opps): "stale",
-                executor.submit(_gather_reopen_opps): "reopen",
+                executor.submit(_gather_alert_signals, user_id=dm_target): "alerts",
+                executor.submit(_gather_checkpoint_signals, user_id=dm_target): "checkpoints",
+                executor.submit(_gather_missing_followups, 7, user_id=dm_target): "followups",
+                executor.submit(_gather_post_meeting_opps, 14, user_id=dm_target): "post_meeting_opp",
+                executor.submit(_gather_stale_opps, user_id=dm_target): "stale",
+                executor.submit(_gather_reopen_opps, user_id=dm_target): "reopen",
             }
 
             for future in as_completed(futures):
@@ -1294,8 +1302,8 @@ def run_priority_actions(client, force: bool = False, silent: bool = False):
             multi_items.sort(key=lambda x: -x["priority"])
             groups["multi_product"] = multi_items[:MAX_PER_CATEGORY]
 
-        _cached_actions = groups
-        _cache_ts = time.time()
+        _cached_actions[dm_target] = groups
+        _cache_ts[dm_target] = time.time()
 
         total_items = sum(len(v) for v in groups.values())
         if total_items == 0 and not force:
@@ -1311,7 +1319,7 @@ def run_priority_actions(client, force: bool = False, silent: bool = False):
 
         fallback = f"Priority Actions: {total_items} items across {len(groups)} categories"
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=fallback,
         )

@@ -21,13 +21,15 @@ from queries.queries import (
     GONG_MEETINGS_FULL_TRANSCRIPT_QUERY,
     ACCOUNT_NOTES_QUERY,
     ACCOUNT_EMAILS_FULL_QUERY,
+    format_query,
 )
 from core.snowflake_client import run_query
 from core.claude_client import call_claude_json
 from core.slack_formatter import sf_account_url, sf_opp_url, simple_dm_blocks, dashboard_url
 from utils.dedup import tracker
 from utils.account_resolver import is_hash_like
-from config import GREG_SLACK_ID, OWNER_NAME
+from config import GREG_SLACK_ID
+from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +160,7 @@ def _build_emails_text(email_rows):
 # Main job
 # ---------------------------------------------------------------------------
 
-def run_post_meeting(client, lookback_days=2, force=False):
+def run_post_meeting(client, user_id=None, lookback_days=2, force=False):
     """Analyze recent Gong calls and DM Greg actionable post-meeting items.
 
     Parameters
@@ -171,9 +173,12 @@ def run_post_meeting(client, lookback_days=2, force=False):
         If True, bypass dedup and include previously surfaced calls.
         When True and nothing is found, send an "All clear" message.
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+
     try:
         # ── 1. Fetch recent calls with follow-up/opp checks ─────────────
-        calls_sql = POST_MEETING_CALLS_QUERY.format(lookback_days=lookback_days)
+        calls_sql = format_query(POST_MEETING_CALLS_QUERY, user_id=user_id, lookback_days=lookback_days)
         calls_df = run_query(calls_sql)
 
         if calls_df.empty:
@@ -185,13 +190,15 @@ def run_post_meeting(client, lookback_days=2, force=False):
                     f"{lookback_days} days.",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Post-Meeting To-Do — All clear",
                 )
             return
 
         # ── 2. Attempt full transcripts, fall back to section summaries ──
-        transcript_sql = GONG_MEETINGS_FULL_TRANSCRIPT_QUERY.format(
+        transcript_sql = format_query(
+            GONG_MEETINGS_FULL_TRANSCRIPT_QUERY,
+            user_id=user_id,
             lookback_days=lookback_days,
         )
         try:
@@ -279,7 +286,7 @@ def run_post_meeting(client, lookback_days=2, force=False):
             dedup_key = f"meeting_{call_id}"
 
             # Dedup check — skip previously surfaced unless force=True
-            if not force and tracker.is_processed(dedup_key):
+            if not force and tracker.is_processed(dedup_key, user_id=dm_target):
                 continue
 
             missing_followup = bool(row.get("missing_followup"))
@@ -316,7 +323,7 @@ def run_post_meeting(client, lookback_days=2, force=False):
                     "to analyze.",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Post-Meeting To-Do — All clear",
                 )
             return
@@ -362,12 +369,12 @@ def run_post_meeting(client, lookback_days=2, force=False):
                     f"Latest stage: {call['latest_stage']}."
                 )
 
-            prompt = f"""You are an AI sales analyst helping {OWNER_NAME}, a Growth Account Manager at Ramp.
-{OWNER_NAME} manages ~4,000 Plus segment accounts. His comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals.
-He earns comp on incremental spend above baseline during a 90-day window after closing an opp.
-Timing opp closes is critical — close too late and the baseline rises, permanently reducing his comp.
+            prompt = f"""You are an AI sales analyst helping {owner_name}, a Growth Account Manager at Ramp.
+{owner_name} manages ~4,000 Plus segment accounts. Their comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals.
+They earn comp on incremental spend above baseline during a 90-day window after closing an opp.
+Timing opp closes is critical — close too late and the baseline rises, permanently reducing their comp.
 
-Analyze this recent Gong call and determine what actions Greg should take.
+Analyze this recent Gong call and determine what actions {owner_name} should take.
 
 CALL INFO:
 - Account: {call['account_name']}
@@ -393,13 +400,13 @@ RECENT EMAILS (last 90 days):
 
 Based on this information, assess:
 1. Was there a buying signal? (customer expressing interest in expanding, activating a new product, increasing spend, consolidating vendors, upgrading to Plus/Procurement, timeline commitments, budget discussions, decision-maker engagement)
-2. Should Greg send a follow-up email? If so, what should it cover?
+2. Should {owner_name} send a follow-up email? If so, what should it cover?
 3. Should a new Salesforce opportunity be created? If so, for which product(s) and estimated amount?
 
 Return a JSON object with these exact keys:
 - "meeting_summary": string (2-3 sentence summary of what was discussed)
 - "detection_type": string (one of: "no_followup", "no_opp", "buying_signal", or "no_followup_and_no_opp" if both apply)
-- "suggested_action": string (specific, actionable recommendation for Greg, 1-2 sentences)
+- "suggested_action": string (specific, actionable recommendation for {owner_name}, 1-2 sentences)
 - "next_steps": string (concrete next steps, e.g. "Send follow-up email to [name] re: card migration timeline. Create Card Expansion opp for ~$X/mo.")
 
 Important: Only flag as "buying_signal" if there is genuine evidence in the transcript/summary. Do not hallucinate signals.
@@ -462,19 +469,19 @@ Return ONLY the JSON object, no markdown fences or extra text."""
                     "signals detected.",
                 )
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID, blocks=blocks,
+                    channel=dm_target, blocks=blocks,
                     text="Post-Meeting To-Do — All clear",
                 )
             return
 
         # ── 8. Mark items as processed in dedup tracker ──────────────────
         for item in analyzed_items:
-            tracker.mark_processed(item["dedup_key"])
+            tracker.mark_processed(item["dedup_key"], user_id=dm_target)
 
         # ── 9. Build Slack Block Kit message and send ────────────────────
         blocks = _build_slack_blocks(analyzed_items)
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=f"Post-Meeting To-Do — {len(analyzed_items)} item(s) flagged",
         )

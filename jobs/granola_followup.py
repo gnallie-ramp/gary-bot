@@ -36,7 +36,8 @@ from templates.help_links import find_relevant_links, format_links_for_email
 from utils.dedup import tracker
 from utils.pending_drafts import save_draft as save_pending_draft
 from utils.account_matcher import match_account
-from config import GREG_SLACK_ID, NTR_RATES, DISPLAY_TIMEZONE, OWNER_NAME, OWNER_FIRST_NAME, BOOKING_LINK
+from config import GREG_SLACK_ID, NTR_RATES, DISPLAY_TIMEZONE
+from core.user_registry import get_user_sf_name, get_user_booking_link
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 _EXPANSION_RECORD_TYPE_ID = "0125b000000PZaIAAW"
 
 
-def run_granola_followup(client, force=False, lookback_minutes=None):
+def run_granola_followup(client, user_id=None, force=False, lookback_minutes=None):
     """Check Granola for recently ended meetings and analyze them.
 
     Parameters
@@ -56,18 +57,23 @@ def run_granola_followup(client, force=False, lookback_minutes=None):
         Custom lookback in minutes. Overrides default (10 min normal, 30 days force).
         Useful for catch-up after bot was offline.
     """
+    dm_target = user_id or GREG_SLACK_ID
+    owner_name = get_user_sf_name(user_id)
+    booking_link = get_user_booking_link(user_id)
+
     try:
         if lookback_minutes is not None:
             lookback = lookback_minutes
         else:
-            # Normal: last 10 min | Force (/post-meeting): 30 days
-            lookback = 60 * 24 * 30 if force else 10
+            # Normal: last 30 min (covers full meeting + end detection lag)
+            # Force (/post-meeting): 30 days
+            lookback = 60 * 24 * 30 if force else 30
         recent = get_recent_meetings(minutes=lookback)
 
         if not recent:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="No recent Granola meetings found.",
                 )
             return
@@ -78,7 +84,7 @@ def run_granola_followup(client, force=False, lookback_minutes=None):
             meeting_id = meeting["id"]
             dedup_key = f"granola_{meeting_id}"
 
-            if not force and tracker.is_processed(dedup_key):
+            if not force and tracker.is_processed(dedup_key, user_id=dm_target):
                 continue
 
             people = meeting.get("people", [])
@@ -93,7 +99,7 @@ def run_granola_followup(client, force=False, lookback_minutes=None):
         if not actionable:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="All recent Granola meetings already processed or internal-only.",
                 )
             return
@@ -101,31 +107,31 @@ def run_granola_followup(client, force=False, lookback_minutes=None):
         # Process each meeting
         results = []
         for meeting, dedup_key, ext_names, ext_emails in actionable[:5]:
-            result = _analyze_granola_meeting(meeting, ext_names, ext_emails)
+            result = _analyze_granola_meeting(meeting, ext_names, ext_emails, owner_name=owner_name, booking_link=booking_link, user_id=dm_target)
             if result:
                 results.append(result)
-                tracker.mark_processed(dedup_key)
+                tracker.mark_processed(dedup_key, user_id=dm_target)
 
         if not results:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="No actionable items from recent Granola meetings.",
                 )
             return
 
-        _send_glass_style_dm(results, client)
+        _send_glass_style_dm(results, client, dm_target=dm_target)
 
     except Exception as e:
         logger.error("Granola followup failed: %s", e)
         if force:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 text=f"Granola followup failed: {e}",
             )
 
 
-def _analyze_granola_meeting(meeting: dict, ext_names: list, ext_emails: list) -> dict | None:
+def _analyze_granola_meeting(meeting: dict, ext_names: list, ext_emails: list, owner_name: str = "", booking_link: str = "", user_id: str = None) -> dict | None:
     """Analyze a single Granola meeting. Returns result dict or None."""
     meeting_id = meeting["id"]
     title = meeting.get("title", "Untitled")
@@ -167,6 +173,7 @@ def _analyze_granola_meeting(meeting: dict, ext_names: list, ext_emails: list) -
     account_match = match_account(
         account_name=_title_clean,
         participant_emails=ext_emails,
+        user_id=user_id,
     )
     account_name = account_match.account_name if account_match.matched else ""
     account_id = account_match.account_id if account_match.matched else ""
@@ -182,9 +189,9 @@ def _analyze_granola_meeting(meeting: dict, ext_names: list, ext_emails: list) -
     if account_id:
         try:
             from core.snowflake_client import run_query
-            from queries.queries import ACCOUNT_OPPS_QUERY
+            from queries.queries import ACCOUNT_OPPS_QUERY, format_query
             import pandas as pd
-            opps_df = run_query(ACCOUNT_OPPS_QUERY)
+            opps_df = run_query(format_query(ACCOUNT_OPPS_QUERY, user_id=user_id))
             if not opps_df.empty:
                 acct_opps = opps_df[opps_df["account_id"] == account_id]
                 if not acct_opps.empty:
@@ -210,9 +217,9 @@ def _analyze_granola_meeting(meeting: dict, ext_names: list, ext_emails: list) -
             links_context += f'- {link["title"]}: {link["url"]}\n'
 
     # Claude analysis — per-product opp suggestions
-    prompt = f"""You are an AI sales analyst helping {OWNER_NAME}, a Growth Account Manager at Ramp.
-{OWNER_NAME} manages ~4,000 Plus segment accounts. His comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals.
-He earns comp on incremental spend above baseline during a 90-day window after closing an opp.
+    prompt = f"""You are an AI sales analyst helping {owner_name}, a Growth Account Manager at Ramp.
+{owner_name} manages ~4,000 Plus segment accounts. Their comp is 75% Realized CP (expansion opps) and 25% SaaS Renewals.
+They earn comp on incremental spend above baseline during a 90-day window after closing an opp.
 Closing too late = baseline rises = comp reduced. Speed matters.
 
 NTR rates for CP calculation:
@@ -254,7 +261,7 @@ Return a JSON object with these exact keys:
     * Use bullet points (<ul><li>) for feature highlights relevant to what was discussed
     * Naturally hyperlink Ramp resources inline where relevant using <a href="URL">text</a> tags — use the AVAILABLE RAMP RESOURCE LINKS above
     * End with a clear next step and offer to help
-    * Sign off as: {OWNER_NAME}\\nAccount Manager @ Ramp\\nBook a meeting: {BOOKING_LINK}
+    * Sign off as: {owner_name}\\nAccount Manager @ Ramp\\nBook a meeting: {booking_link}
     * Tone: warm, helpful, consultative — like a trusted advisor, not salesy
     * Do NOT use markdown — use HTML tags only (<strong>, <ul>, <li>, <a>, <br>, <p>)
 - "follow_up_email_cc": string — other emails to CC, comma-separated, or empty
@@ -267,7 +274,7 @@ Return a JSON object with these exact keys:
     - "next_step": string — the specific next action for this product based on what was discussed (e.g. "Schedule Treasury demo with Brooks", "Send Bill Pay migration CSV template"). Be concrete and reference the transcript.
     - "next_step_due_date": string (YYYY-MM-DD). Use the specific date if a timeline was explicitly discussed. Otherwise leave empty and the system will default to 1 week from today.
   Include products that were discussed with genuine interest OR were a major talking point on the call, even if no specific dollar amount was mentioned. Use 15000 as the default monthly_amount when no amount was stated. Empty list only if no products were discussed at all.
-- "next_steps": list of strings — 1-3 concrete next steps for Greg (overall, not per-product)
+- "next_steps": list of strings — 1-3 concrete next steps for {owner_name} (overall, not per-product)
 - "urgency": string — "high", "medium", or "low"
 - "opp_updates": list of objects for EXISTING open opps that should be updated based on the call. Each with:
     - "product": string — which existing opp product to update (must match one from EXISTING OPEN OPPS above)
@@ -315,7 +322,7 @@ Return ONLY valid JSON, no markdown fences."""
     }
 
 
-def _send_glass_style_dm(results: list[dict], client):
+def _send_glass_style_dm(results: list[dict], client, dm_target=None):
     """Send a Glass-style consolidated DM with per-product opp buttons."""
     blocks = [{
         "type": "header",
@@ -411,11 +418,12 @@ def _send_glass_style_dm(results: list[dict], client):
                     html_body += f"<br>{links_html}"
 
             try:
-                from templates.signature import SIGNATURE_HTML
+                from templates.signature import build_signature
+                sig_html = build_signature(user_id=dm_target)
             except ImportError:
-                SIGNATURE_HTML = ""
-            if SIGNATURE_HTML:
-                html_body += f"<br>{SIGNATURE_HTML}"
+                sig_html = ""
+            if sig_html:
+                html_body += f"<br>{sig_html}"
 
             # Create Gmail draft directly via Gumstack MCP (no Glass needed)
             meeting_id = item.get("meeting_id", "")
@@ -426,7 +434,7 @@ def _send_glass_style_dm(results: list[dict], client):
             if gumstack_ok():
                 gm_result = gumstack_create_draft(
                     to=email_to, subject=email_subject, html_body=html_body,
-                    cc=cc, label=draft_label,
+                    cc=cc, label=draft_label, user_id=dm_target,
                 )
                 if gm_result["success"]:
                     draft_text = (
@@ -442,7 +450,7 @@ def _send_glass_style_dm(results: list[dict], client):
                         draft_id=pending_id, to=email_to, cc=cc,
                         subject=email_subject, html_body=html_body,
                         account_name=account_name, meeting_id=meeting_id,
-                        label=draft_label,
+                        label=draft_label, user_id=dm_target,
                     )
                     draft_text = (
                         f"\u2709\ufe0f *Draft queued* \u2192 _{email_subject}_\n"
@@ -457,7 +465,7 @@ def _send_glass_style_dm(results: list[dict], client):
                     draft_id=pending_id, to=email_to, cc=cc,
                     subject=email_subject, html_body=html_body,
                     account_name=account_name, meeting_id=meeting_id,
-                    label=draft_label,
+                    label=draft_label, user_id=dm_target,
                 )
                 draft_text = (
                     f"\u2709\ufe0f *Draft queued* \u2192 _{email_subject}_\n"
@@ -620,7 +628,7 @@ def _send_glass_style_dm(results: list[dict], client):
     })
 
     client.chat_postMessage(
-        channel=GREG_SLACK_ID,
+        channel=dm_target,
         blocks=blocks,
         text=f"Post-Meeting Follow-Up: {len(results)} call(s) analyzed",
     )

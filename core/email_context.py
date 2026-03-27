@@ -50,25 +50,64 @@ def _get_domain_from_contacts(contact_emails: list[str]) -> str | None:
 
 
 def _gmail_context(
-    contact_emails: list[str], domain: str | None, days: int = 30
+    contact_emails: list[str], domain: str | None, days: int = 30,
+    user_id: str | None = None,
 ) -> dict | None:
-    """Try to get email context from Gmail IMAP."""
+    """Try to get email context from Gumstack Gmail MCP."""
     try:
-        from core.gmail_client import search_emails, _api_available
+        from core.gumstack_gmail import read_emails, is_available
 
-        if _api_available is False:
+        if not is_available(user_id=user_id):
             return None
 
-        emails = search_emails(
-            contact_emails=contact_emails or None,
-            domain=domain,
-            days=days,
-            max_results=10,
-        )
-        if not emails:
+        # Build Gmail search query from contacts/domain
+        if contact_emails:
+            addr_queries = " OR ".join(
+                f"from:{addr} OR to:{addr}" for addr in contact_emails[:5]
+            )
+            query = f"({addr_queries}) newer_than:{days}d"
+        elif domain:
+            query = f"(from:@{domain} OR to:@{domain}) newer_than:{days}d"
+        else:
+            return None
+
+        raw_emails = read_emails(query, max_results=10, user_id=user_id)
+        if not raw_emails:
             # Try domain if contact search found nothing
             if domain and contact_emails:
-                emails = search_emails(domain=domain, days=days, max_results=10)
+                domain_query = f"(from:@{domain} OR to:@{domain}) newer_than:{days}d"
+                raw_emails = read_emails(domain_query, max_results=10, user_id=user_id)
+
+        if not raw_emails:
+            return None
+
+        # Determine the user's email for direction detection
+        from core.user_registry import get_user_email
+        my_email = (get_user_email(user_id) if user_id else "").lower()
+        if not my_email:
+            from config import GMAIL_ADDRESS
+            my_email = (GMAIL_ADDRESS or "").lower()
+
+        # Convert to the format expected by the rest of this function
+        import re
+        def _parse_addr(addr_str):
+            if not addr_str:
+                return ""
+            match = re.search(r"<([^>]+)>", addr_str)
+            return match.group(1).lower() if match else addr_str.strip().lower()
+
+        emails = []
+        for em in raw_emails:
+            from_addr = _parse_addr(em.get("from", ""))
+            direction = "outbound" if my_email and my_email in from_addr else "inbound"
+            emails.append({
+                "date": em.get("date", ""),
+                "subject": em.get("subject", ""),
+                "from_addr": from_addr,
+                "to_addr": em.get("to", ""),
+                "direction": direction,
+                "snippet": (em.get("body", "") or "")[:300],
+            })
 
         if not emails:
             return None
@@ -116,7 +155,7 @@ def _gmail_context(
 # ── Snowflake source ─────────────────────────────────────────────────────────
 
 
-def _snowflake_context(account_id: str) -> dict | None:
+def _snowflake_context(account_id: str, user_id: str | None = None) -> dict | None:
     """Get email context from Snowflake dim_emails — all Ramp employee emails."""
     try:
         query = f"""
@@ -147,11 +186,18 @@ def _snowflake_context(account_id: str) -> dict | None:
         last = df.iloc[0]
         last_dir = last.get("direction", "")
         last_sender = last.get("sender_email", "")
-        is_greg = "gnallie" in str(last_sender).lower()
+        # Determine if this sender is the current user
+        from core.user_registry import get_user_email
+        _user_email = (get_user_email(user_id) if user_id else "").lower()
+        if not _user_email:
+            from config import GMAIL_ADDRESS
+            _user_email = (GMAIL_ADDRESS or "").lower()
+        _user_name_part = _user_email.split("@")[0] if _user_email else ""
+        is_self = (_user_name_part and _user_name_part in str(last_sender).lower()) if _user_name_part else False
         if "outbound" in str(last_dir).lower():
-            last_direction = "You → them" if is_greg else f"{last_sender} → them"
+            last_direction = "You → them" if is_self else f"{last_sender} → them"
         else:
-            last_direction = "They → you" if is_greg else f"They → {last_sender}"
+            last_direction = "They → you" if is_self else f"They → {last_sender}"
 
         # Count unanswered: if most recent is inbound
         unanswered = 0
@@ -234,8 +280,11 @@ def _snowflake_context(account_id: str) -> dict | None:
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
-def get_email_context(account_id: str, account_name: str = "", days: int = 30) -> dict:
-    """Get email context for an account. Tries Gmail IMAP first, falls back to Snowflake.
+def get_email_context(
+    account_id: str, account_name: str = "", days: int = 30,
+    user_id: str | None = None,
+) -> dict:
+    """Get email context for an account. Tries Gumstack Gmail first, falls back to Snowflake.
 
     Returns
     -------
@@ -254,23 +303,31 @@ def get_email_context(account_id: str, account_name: str = "", days: int = 30) -
     contact_emails = _get_contact_emails_for_account(account_id)
     domain = _get_domain_from_contacts(contact_emails)
 
-    # Try Gmail IMAP first (real-time)
-    ctx = _gmail_context(contact_emails, domain, days=days)
+    # Try Gumstack Gmail first (real-time)
+    ctx = _gmail_context(contact_emails, domain, days=days, user_id=user_id)
     if ctx:
         return ctx
 
     # Fall back to Snowflake
-    ctx = _snowflake_context(account_id)
+    ctx = _snowflake_context(account_id, user_id=user_id)
     if ctx:
         return ctx
 
     return {"source": "none", "email_count": 0}
 
 
-def format_email_context_line(ctx: dict) -> str:
+def format_email_context_line(ctx: dict, user_id: str | None = None) -> str:
     """Format email context as a single Slack mrkdwn line for inline use."""
     if ctx.get("source") == "none" or ctx.get("email_count", 0) == 0:
         return "No recent email activity"
+
+    # Determine current user's email for filtering
+    from core.user_registry import get_user_email
+    _user_email = (get_user_email(user_id) if user_id else "").lower()
+    if not _user_email:
+        from config import GMAIL_ADDRESS
+        _user_email = (GMAIL_ADDRESS or "").lower()
+    _user_name_part = _user_email.split("@")[0] if _user_email else ""
 
     parts = []
     if ctx.get("last_contact_date"):
@@ -284,17 +341,28 @@ def format_email_context_line(ctx: dict) -> str:
         parts.append("*Unanswered inbound*")
     # Show if other Ramp teams are active
     senders = ctx.get("ramp_senders", [])
-    other_teams = [s["team"] for s in senders if s.get("team") and "gnallie" not in s.get("email", "")]
+    other_teams = [
+        s["team"] for s in senders
+        if s.get("team") and _user_name_part and _user_name_part not in s.get("email", "")
+    ]
     if other_teams:
         parts.append(f"Also: {', '.join(dict.fromkeys(other_teams))}")
 
     return " · ".join(parts) if parts else f"{ctx['email_count']} emails in last 30d"
 
 
-def format_email_context_block(ctx: dict) -> str:
+def format_email_context_block(ctx: dict, user_id: str | None = None) -> str:
     """Format email context as a multi-line Slack mrkdwn block for detailed views."""
     if ctx.get("source") == "none" or ctx.get("email_count", 0) == 0:
         return "_No recent email activity found._"
+
+    # Determine current user's email for filtering
+    from core.user_registry import get_user_email
+    _user_email = (get_user_email(user_id) if user_id else "").lower()
+    if not _user_email:
+        from config import GMAIL_ADDRESS
+        _user_email = (GMAIL_ADDRESS or "").lower()
+    _user_name_part = _user_email.split("@")[0] if _user_email else ""
 
     lines = [f"*Email Activity* ({ctx['email_count']} emails, via {ctx['source']})"]
 
@@ -311,7 +379,10 @@ def format_email_context_block(ctx: dict) -> str:
     # Ramp team activity
     senders = ctx.get("ramp_senders", [])
     if len(senders) > 1:
-        other = [s for s in senders if "gnallie" not in s.get("email", "")]
+        other = [
+            s for s in senders
+            if not (_user_name_part and _user_name_part in s.get("email", ""))
+        ]
         if other:
             sender_strs = [f"{s['email'].split('@')[0]} ({s['team'] or 'unknown'}, {s['count']})" for s in other[:4]]
             lines.append(f"  Other Ramp senders: {', '.join(sender_strs)}")
@@ -341,7 +412,7 @@ def format_email_context_block(ctx: dict) -> str:
         for t in threads[:5]:
             dir_icon = "→" if "outbound" in str(t.get("direction", "")).lower() else "←"
             sender_note = ""
-            if t.get("sender") and "gnallie" not in t.get("sender", ""):
+            if t.get("sender") and not (_user_name_part and _user_name_part in t.get("sender", "")):
                 sender_note = f" [{t['sender'].split('@')[0]}]"
             lines.append(f'    {dir_icon} "{t["subject"]}" ({t["date"]}){sender_note}')
 

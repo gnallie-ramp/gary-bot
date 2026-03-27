@@ -125,7 +125,7 @@ def _build_unified_blocks(date_str: str, groups: dict[str, list[dict]]) -> list[
     return blocks
 
 
-def run_morning_brief(client, force: bool = False):
+def run_morning_brief(client, user_id=None, force: bool = False):
     """Generate and send the unified morning brief.
 
     Runs the full priority_actions pipeline in silent mode to populate the
@@ -133,14 +133,16 @@ def run_morning_brief(client, force: bool = False):
     """
     from jobs.priority_actions import run_priority_actions, get_cached_category
 
+    dm_target = user_id or GREG_SLACK_ID
+
     try:
         # Populate the priority_actions cache with all signal categories
-        run_priority_actions(client, force=True, silent=True)
+        run_priority_actions(client, user_id=dm_target, force=True, silent=True)
 
         # Read all categories from the cache
         groups = {}
         for cat_key, _, _ in _CATEGORY_META:
-            items = get_cached_category(cat_key)
+            items = get_cached_category(cat_key, user_id=dm_target)
             if items:
                 groups[cat_key] = items
 
@@ -155,7 +157,7 @@ def run_morning_brief(client, force: bool = False):
         total_cp = sum(a.get("est_cp", 0) for items in groups.values() for a in items)
         fallback = f"Morning Brief: {total_items} actions, {format_currency(total_cp)} CP at stake"
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=fallback,
         )

@@ -28,9 +28,9 @@ from config import GREG_SLACK_ID
 
 logger = logging.getLogger(__name__)
 
-# Track what was surfaced in the last nudge to detect changes
-_last_nudge_keys: set[str] = set()
-_last_nudge_ts: float = 0.0
+# Track what was surfaced in the last nudge to detect changes (per-user)
+_last_nudge_keys: dict[str, set[str]] = {}
+_last_nudge_ts: dict[str, float] = {}
 
 # Maximum items to show in a single nudge
 _MAX_NUDGE_ITEMS = 5
@@ -41,7 +41,7 @@ def _item_key(item: dict) -> str:
     return f"{item.get('account_id', '')}:{item.get('type', '')}:{item.get('product', '')}"
 
 
-def _pick_top_suggestions(groups: dict[str, list[dict]], is_first: bool) -> list[dict]:
+def _pick_top_suggestions(groups: dict[str, list[dict]], is_first: bool, last_nudge_keys: set[str] | None = None) -> list[dict]:
     """Pick the highest-value items to surface, prioritizing new signals.
 
     Parameters
@@ -56,7 +56,8 @@ def _pick_top_suggestions(groups: dict[str, list[dict]], is_first: bool) -> list
     list[dict]
         Top items to surface, each annotated with '_nudge_reason'.
     """
-    global _last_nudge_keys
+    if last_nudge_keys is None:
+        last_nudge_keys = set()
 
     all_items = []
     for cat, items in groups.items():
@@ -72,7 +73,7 @@ def _pick_top_suggestions(groups: dict[str, list[dict]], is_first: bool) -> list
     continuing_items = []
     for item in all_items:
         key = _item_key(item)
-        if key not in _last_nudge_keys:
+        if key not in last_nudge_keys:
             item["_nudge_reason"] = "new"
             new_items.append(item)
         else:
@@ -294,7 +295,7 @@ def _build_nudge_blocks(
     return blocks
 
 
-def run_proactive_nudge(client, force: bool = False):
+def run_proactive_nudge(client, user_id=None, force: bool = False):
     """Check for changes and send a proactive nudge if warranted.
 
     Parameters
@@ -304,13 +305,13 @@ def run_proactive_nudge(client, force: bool = False):
         When True, always send (on-demand use). Otherwise, skip if
         nothing changed since the last nudge.
     """
-    global _last_nudge_keys, _last_nudge_ts
+    dm_target = user_id or GREG_SLACK_ID
 
     try:
         from jobs.priority_actions import run_priority_actions, get_cached_category
 
         # Refresh the priority actions cache
-        run_priority_actions(client, force=True, silent=True)
+        run_priority_actions(client, user_id=dm_target, force=True, silent=True)
 
         # Read all categories
         _CATEGORIES = [
@@ -319,7 +320,7 @@ def run_proactive_nudge(client, force: bool = False):
         ]
         groups = {}
         for cat in _CATEGORIES:
-            items = get_cached_category(cat)
+            items = get_cached_category(cat, user_id=dm_target)
             if items:
                 groups[cat] = items
 
@@ -327,44 +328,46 @@ def run_proactive_nudge(client, force: bool = False):
         if total_items == 0:
             if force:
                 client.chat_postMessage(
-                    channel=GREG_SLACK_ID,
+                    channel=dm_target,
                     text="All clear — no actionable signals right now. I'll check again in 2 hours.",
                 )
-            _last_nudge_keys = set()
-            _last_nudge_ts = time.time()
+            _last_nudge_keys[dm_target] = set()
+            _last_nudge_ts[dm_target] = time.time()
             return
 
         # Determine what's new
         all_items = [item for items in groups.values() for item in items]
         current_keys = {_item_key(item) for item in all_items}
-        is_first = _last_nudge_ts == 0.0
-        new_count = len(current_keys - _last_nudge_keys) if not is_first else 0
+        user_last_keys = _last_nudge_keys.get(dm_target, set())
+        user_last_ts = _last_nudge_ts.get(dm_target, 0.0)
+        is_first = user_last_ts == 0.0
+        new_count = len(current_keys - user_last_keys) if not is_first else 0
 
         # Skip if nothing changed and not forced
         if not force and not is_first and new_count == 0:
             logger.info("Proactive nudge: no new signals, skipping")
-            _last_nudge_ts = time.time()
+            _last_nudge_ts[dm_target] = time.time()
             return
 
         # Pick the best items to surface
-        picks = _pick_top_suggestions(groups, is_first)
+        picks = _pick_top_suggestions(groups, is_first, last_nudge_keys=user_last_keys)
         if not picks and not force:
             logger.info("Proactive nudge: no high-value picks, skipping")
-            _last_nudge_ts = time.time()
+            _last_nudge_ts[dm_target] = time.time()
             return
 
         # Build and send
         blocks = _build_nudge_blocks(picks, groups, new_count, total_items)
         fallback = f"Check-in: {new_count} new signals, {total_items} total actions"
         client.chat_postMessage(
-            channel=GREG_SLACK_ID,
+            channel=dm_target,
             blocks=blocks,
             text=fallback,
         )
 
         # Update state
-        _last_nudge_keys = current_keys
-        _last_nudge_ts = time.time()
+        _last_nudge_keys[dm_target] = current_keys
+        _last_nudge_ts[dm_target] = time.time()
         logger.info(
             "Proactive nudge sent: %d picks, %d new signals, %d total",
             len(picks), new_count, total_items,
@@ -374,6 +377,6 @@ def run_proactive_nudge(client, force: bool = False):
         logger.error("Proactive nudge failed: %s", e)
         if force:
             client.chat_postMessage(
-                channel=GREG_SLACK_ID,
+                channel=dm_target,
                 text=f"Nudge check failed: {e}",
             )
