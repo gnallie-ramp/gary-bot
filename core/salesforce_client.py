@@ -1,10 +1,13 @@
-"""Salesforce access via Gumstack MCP (replaces sf CLI, which was revoked).
+"""Salesforce access — reads via Gumstack MCP, writes pending Growth MCP.
 
-Uses the Gumstack Salesforce MCP server at mcp.gumloop.com/salesforce/mcp
-with OAuth tokens stored by mcp-remote. Same auth pattern as Gmail and Gong.
+Reads (SOQL queries, auth check): Gumstack Salesforce MCP at
+mcp.gumloop.com/salesforce/mcp. Works with OAuth tokens from mcp-remote.
 
-Auth setup: npx mcp-remote https://mcp.gumloop.com/salesforce/mcp
-Re-auth: gumloop.com/personal/apps > Salesforce > Reconnect
+Writes (create/update opps): Gumstack blocks write operations.
+TODO: Wire create_opportunity/update_opportunity through Growth MCP
+once write capabilities ship (expected April 2026).
+
+sf CLI was revoked by Ramp security (April 2026).
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ def create_opportunity(fields: dict, user_id: str | None = None) -> str | None:
     str or None
         The new Opportunity ID, or None on failure.
     """
+    # TODO: Gumstack MCP blocks writes. Swap to Growth MCP when available.
     opp_id = _gumstack_create("Opportunity", fields, user_id=user_id)
     if opp_id:
         logger.info("Created Salesforce Opportunity: %s", opp_id)
@@ -76,6 +80,7 @@ def update_opportunity(opp_id: str, fields: dict, user_id: str | None = None) ->
     bool
         True if update succeeded.
     """
+    # TODO: Gumstack MCP blocks writes. Swap to Growth MCP when available.
     success = _gumstack_update("Opportunity", opp_id, fields, user_id=user_id)
     if success:
         logger.info("Updated Salesforce Opportunity: %s", opp_id)
