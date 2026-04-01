@@ -1,82 +1,31 @@
-"""Salesforce access via the `sf` CLI (SSO-authenticated).
+"""Salesforce access via Gumstack MCP (replaces sf CLI, which was revoked).
 
-Uses the locally cached browser-based SSO session from `sf org login web`.
-No passwords or tokens needed in .env — mirrors the Snowflake/snow CLI pattern.
+Uses the Gumstack Salesforce MCP server at mcp.gumloop.com/salesforce/mcp
+with OAuth tokens stored by mcp-remote. Same auth pattern as Gmail and Gong.
+
+Auth setup: npx mcp-remote https://mcp.gumloop.com/salesforce/mcp
+Re-auth: gumloop.com/personal/apps > Salesforce > Reconnect
 """
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
+
+from core.gumstack_salesforce import (
+    ensure_auth as _gumstack_ensure_auth,
+    create_record as _gumstack_create,
+    update_record as _gumstack_update,
+    soql_query as _gumstack_soql,
+)
 
 logger = logging.getLogger(__name__)
 
-_SF_ORG_ALIAS = "ramp"
 
-
-def _run_sf(*args, timeout: int = 30) -> dict:
-    """Run an sf CLI command and return the parsed JSON result."""
-    cmd = ["sf", *args, "--json", "--target-org", _SF_ORG_ALIAS]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        parsed = json.loads(result.stdout) if result.stdout else {}
-        if result.returncode != 0:
-            err_msg = parsed.get("message", result.stderr or "Unknown error")
-            # Extract field-level errors from data array (SF "Multiple errors")
-            data = parsed.get("data", []) or parsed.get("result", {}).get("errors", [])
-            if data and isinstance(data, list):
-                details = "; ".join(
-                    e.get("message", str(e)) if isinstance(e, dict) else str(e)
-                    for e in data[:5]
-                )
-                err_msg = f"{err_msg} [{details}]"
-            raise RuntimeError(f"sf CLI error: {err_msg}")
-        return parsed
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"sf CLI timed out after {timeout}s")
-    except json.JSONDecodeError:
-        raise RuntimeError(f"sf CLI returned non-JSON: {result.stdout[:200]}")
-
-
-def ensure_auth() -> bool:
-    """Check if the sf CLI has a valid cached auth session.
+def ensure_auth(user_id: str | None = None) -> bool:
+    """Check if Salesforce MCP auth is working.
 
     Returns True if authenticated, False otherwise.
     """
-    try:
-        result = _run_sf("org", "display")
-        status = result.get("result", {}).get("connectedStatus", "")
-        return status == "Connected"
-    except Exception as e:
-        logger.warning("Salesforce auth check failed: %s", e)
-        return False
-
-
-def _is_auth_error(error_msg: str) -> bool:
-    """Check if an SF CLI error indicates an expired auth session."""
-    auth_keywords = [
-        "expired", "invalid_grant", "INVALID_SESSION_ID",
-        "Session expired", "Authentication", "auth",
-        "org login", "refresh token", "NOT_FOUND",
-    ]
-    msg_lower = str(error_msg).lower()
-    return any(kw.lower() in msg_lower for kw in auth_keywords)
-
-
-def _alert_if_auth_error(error: Exception, user_id: str | None = None) -> None:
-    """If the error looks like an auth failure, send an inline alert."""
-    if _is_auth_error(str(error)):
-        try:
-            from utils.auth_health import alert_auth_failure
-            from config import GREG_SLACK_ID
-            alert_auth_failure("salesforce", user_id or GREG_SLACK_ID, str(error)[:200])
-        except Exception:
-            pass  # Don't let alert failures break the caller
+    return _gumstack_ensure_auth(user_id=user_id)
 
 
 def create_opportunity(fields: dict, user_id: str | None = None) -> str | None:
@@ -85,7 +34,7 @@ def create_opportunity(fields: dict, user_id: str | None = None) -> str | None:
     Parameters
     ----------
     fields : dict
-        Field API names → values. Example::
+        Field API names -> values. Example::
 
             {
                 "AccountId": "001...",
@@ -104,30 +53,10 @@ def create_opportunity(fields: dict, user_id: str | None = None) -> str | None:
     str or None
         The new Opportunity ID, or None on failure.
     """
-    # Build the field values string for sf data create record
-    # The sf CLI parses --values as space-separated key=value pairs.
-    # Values with spaces must be enclosed in double quotes WITHIN the string.
-    values_parts = []
-    for key, val in fields.items():
-        safe_val = str(val).replace('"', '\\"').replace("'", "\\'")
-        # Always double-quote values to handle spaces, commas, special chars
-        values_parts.append(f'{key}="{safe_val}"')
-    values_str = " ".join(values_parts)
-
-    try:
-        result = _run_sf(
-            "data", "create", "record",
-            "--sobject", "Opportunity",
-            "--values", values_str,
-        )
-        opp_id = result.get("result", {}).get("id")
-        if opp_id:
-            logger.info("Created Salesforce Opportunity: %s", opp_id)
-        return opp_id
-    except Exception as e:
-        logger.error("Failed to create Salesforce Opportunity: %s", e)
-        _alert_if_auth_error(e, user_id=user_id)
-        return None
+    opp_id = _gumstack_create("Opportunity", fields, user_id=user_id)
+    if opp_id:
+        logger.info("Created Salesforce Opportunity: %s", opp_id)
+    return opp_id
 
 
 def update_opportunity(opp_id: str, fields: dict, user_id: str | None = None) -> bool:
@@ -147,25 +76,10 @@ def update_opportunity(opp_id: str, fields: dict, user_id: str | None = None) ->
     bool
         True if update succeeded.
     """
-    values_parts = []
-    for key, val in fields.items():
-        safe_val = str(val).replace('"', '\\"').replace("'", "\\'")
-        values_parts.append(f'{key}="{safe_val}"')
-    values_str = " ".join(values_parts)
-
-    try:
-        _run_sf(
-            "data", "update", "record",
-            "--sobject", "Opportunity",
-            "--record-id", opp_id,
-            "--values", values_str,
-        )
+    success = _gumstack_update("Opportunity", opp_id, fields, user_id=user_id)
+    if success:
         logger.info("Updated Salesforce Opportunity: %s", opp_id)
-        return True
-    except Exception as e:
-        logger.error("Failed to update Salesforce Opportunity %s: %s", opp_id, e)
-        _alert_if_auth_error(e, user_id=user_id)
-        return False
+    return success
 
 
 def get_gong_call_url(account_id: str) -> str:
@@ -193,22 +107,22 @@ def get_gong_call_url(account_id: str) -> str:
     return ""
 
 
-def query(soql: str) -> list[dict]:
+def query(soql: str, user_id: str | None = None) -> list[dict]:
     """Run a SOQL query and return the records.
 
     Parameters
     ----------
     soql : str
         SOQL query string.
+    user_id : str, optional
+        Slack user ID for per-user auth.
 
     Returns
     -------
     list[dict]
         List of record dicts.
     """
-    try:
-        result = _run_sf("data", "query", "--query", soql)
-        return result.get("result", {}).get("records", [])
-    except Exception as e:
-        logger.error("Salesforce query failed: %s", e)
+    result = _gumstack_soql(soql, user_id=user_id)
+    if result is None:
         return []
+    return result

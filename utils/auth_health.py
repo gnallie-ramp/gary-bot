@@ -134,7 +134,7 @@ class AuthHealth:
             return False
 
     def check_sf_health(self) -> bool:
-        """Test Salesforce sf CLI connectivity and update status. Returns True if ok."""
+        """Test Salesforce MCP connectivity and update status. Returns True if ok."""
         try:
             from core.salesforce_client import ensure_auth
 
@@ -144,7 +144,7 @@ class AuthHealth:
             else:
                 self.update_status(
                     "salesforce", "expired",
-                    error="SSO session expired — run: sf org login web --alias ramp",
+                    error="Salesforce MCP auth expired — re-auth at gumloop.com/personal/apps",
                 )
                 return False
         except Exception as exc:

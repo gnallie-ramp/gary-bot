@@ -35,11 +35,12 @@ Via ConductorOne/Okta, request:
 2. **Settings** > **API Keys** > create one
 3. Save it — you'll paste it during setup
 
-### 1c. Connect Gmail and Gong on Gumstack
+### 1c. Connect Gmail, Gong, and Salesforce on Gumstack
 
 1. Go to gumloop.com/personal/apps and log in with your Ramp account
 2. Find **Gmail** > click **Connect** > authorize with your Ramp Google account
 3. Find **Gong** > click **Connect** > authorize with your Gong account
+4. Find **Salesforce** > click **Connect** > authorize with your Salesforce account
 
 ### 1d. Install Project Glass
 
@@ -90,9 +91,6 @@ Then install system packages:
 
 Source the gcloud CLI into the current shell:
   source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc"
-
-Install Salesforce CLI:
-  npm install -g @salesforce/cli
 
 ## Phase 3: GitHub auth + clone repo
 
@@ -169,21 +167,35 @@ Show the user both files and ask them to confirm the values look correct before 
 
 ## Phase 7: Browser-based authentication
 
-There are 3 browser auth steps. For EACH one: run the command yourself, tell the user a browser is opening and what to do, then wait for them to confirm before moving to the next.
+There are 2 browser auth steps. For EACH one: run the command yourself, tell the user a browser is opening and what to do, then wait for them to confirm before moving to the next.
 
 Step 1 — Snowflake:
 Run: cd ~/gary-bot && source venv/bin/activate && snow connection test
 Tell user: "A browser window is opening for Snowflake/Okta SSO. Sign in and tell me when done."
 
-Step 2 — Salesforce:
-Run: sf org login web --alias ramp --instance-url https://rampfinancial.lightning.force.com
-Tell user: "A browser window is opening for Salesforce SSO. Sign in and tell me when done."
-
-Step 3 — Google Calendar:
+Step 2 — Google Calendar:
 Run: source "$(brew --prefix)/share/google-cloud-sdk/path.zsh.inc" && gcloud auth application-default login --scopes=https://www.googleapis.com/auth/calendar.readonly
 Tell user: "A browser window is opening for Google auth. Sign in with your Ramp Google account and tell me when done."
 
-## Phase 8: Set up auto-start on login (launchd)
+Note: Salesforce uses Gumstack MCP (same as Gmail/Gong) — no sf CLI login needed.
+
+## Phase 8: Gumstack token auth (Gmail + Gong + Salesforce MCP access)
+
+There are 3 MCP auth steps. For EACH one: run the command yourself, tell the user a browser is opening, and wait for them to confirm.
+
+Step 1 — Gmail:
+Run: npx mcp-remote https://mcp.gumloop.com/gmail/mcp
+Tell user: "A browser window is opening for Gmail MCP auth. Authorize with your Ramp Google account and tell me when done."
+
+Step 2 — Gong:
+Run: npx mcp-remote https://mcp.gumloop.com/gong/mcp
+Tell user: "A browser window is opening for Gong MCP auth. Authorize and tell me when done."
+
+Step 3 — Salesforce:
+Run: npx mcp-remote https://mcp.gumloop.com/salesforce/mcp
+Tell user: "A browser window is opening for Salesforce MCP auth. Authorize with your Ramp account and tell me when done."
+
+## Phase 9: Set up auto-start on login (launchd)
 
 Run: mkdir -p ~/Library/LaunchAgents
 
@@ -201,7 +213,7 @@ Write the plist file at ~/Library/LaunchAgents/com.gary-bot.plist. Use the user'
 
 Load it: launchctl load ~/Library/LaunchAgents/com.gary-bot.plist
 
-## Phase 9: Verify
+## Phase 10: Verify
 
 Wait 10 seconds, then check the log:
   tail -20 ~/.gary_bot_stdout.log
@@ -228,7 +240,7 @@ After setup completes, test each integration:
 | **Bot running** | Check log: `tail -20 ~/.gary_bot_stdout.log` | "Scheduler started with 26 jobs" |
 | **Slack connected** | Open your bot's **Home tab** in Slack | Header + quota snapshot + priority alerts |
 | **Snowflake** | `snow sql --query "SELECT CURRENT_USER()" --format json --silent` | Your email address |
-| **Salesforce** | `sf org display --target-org ramp` | Shows your org info |
+| **Salesforce** | DM your bot: `status` and check Salesforce line | Shows "Connected" |
 | **Status check** | DM your bot: `status` | Health check with integration statuses |
 | **Slash commands** | Run `/<prefix>-priorities` in Slack (using your prefix) | Your accounts' spend signals |
 
@@ -315,7 +327,7 @@ No restart needed. View registered users: `cat ~/.gary_bot_users.json | python3 
 | `command not found: python3.12` | `brew install python@3.12` then restart Terminal |
 | `command not found: gh` or `node` | Run the Homebrew PATH commands — likely skipped after install |
 | `command not found: snow` | `pip install snowflake-cli-labs && ln -sf "$(which snow)" /opt/homebrew/bin/snow` |
-| `command not found: sf` | `npm install -g @salesforce/cli` |
+| Salesforce auth failed | Re-auth at gumloop.com/personal/apps > Salesforce > Reconnect |
 | `No module named 'slack_bolt'` | Not in virtualenv: `cd ~/gary-bot && source venv/bin/activate` |
 | Snowflake: `Bad owner or permissions` | `chmod 0600 ~/.snowflake/config.toml` |
 | Snowflake: `User is empty` | Add `user = "you@ramp.com"` to `~/.snowflake/config.toml` |
