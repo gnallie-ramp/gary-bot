@@ -35,11 +35,33 @@ def resolve_account_name(conn, business_name: str, user_id: str | None = None) -
 
     safe_name = business_name.strip().replace("'", "''")
 
-    # Strategy 1: Exact substring match (ILIKE)
+    # Build a flexible ILIKE pattern: "millsapartments" → "%mills%apartments%"
+    # by splitting on camelCase boundaries and common word boundaries.
+    # This helps match "Mills Apartments" from "millsapartments".
+    import re as _re
+    _split_pattern = _re.sub(r'([a-z])([A-Z])', r'\1 \2', safe_name)  # camelCase
+    _words = _re.findall(r'[A-Za-z]+', _split_pattern)
+    if len(_words) <= 1:
+        # Try splitting run-together words using common suffixes
+        _words = _re.findall(
+            r'[A-Za-z]+?(?=apartments|dental|health|tech|group|partners|capital|'
+            r'solutions|services|medical|holdings|logistics|management|consulting|'
+            r'financial|insurance|industries|properties|enterprises|associates|'
+            r'(?=[A-Z])|$)',
+            safe_name, flags=_re.IGNORECASE,
+        )
+        _words = [w for w in _words if w]  # drop empty
+    if len(_words) > 1:
+        flexible_like = "%" + "%".join(w.replace("'", "''") for w in _words) + "%"
+    else:
+        flexible_like = f"%{safe_name}%"
+
+    # Strategy 1: Exact substring match (ILIKE) — owner-filtered
     query = f"""
     SELECT sa.account_id, sa.account_name, sa.business_id
     FROM analytics.marts.dim_sfdc_accounts sa
-    WHERE sa.account_name ILIKE '%{safe_name}%'
+    WHERE (sa.account_name ILIKE '%{safe_name}%'
+           OR sa.account_name ILIKE '{flexible_like}')
       AND sa.account_status = 'Active'
       AND sa.account_id IN (
           SELECT DISTINCT account_id
@@ -51,6 +73,23 @@ def resolve_account_name(conn, business_name: str, user_id: str | None = None) -
     """
     try:
         df = run_query(query)
+        if df.empty:
+            # Strategy 1b: Exact ILIKE WITHOUT owner filter — ledger may be stale
+            logger.debug("resolve_account_name: no owner-filtered match for '%s', trying without owner filter", business_name)
+            unowned_query = f"""
+            SELECT sa.account_id, sa.account_name, sa.business_id
+            FROM analytics.marts.dim_sfdc_accounts sa
+            WHERE (sa.account_name ILIKE '%{safe_name}%'
+                   OR sa.account_name ILIKE '{flexible_like}')
+              AND sa.account_status = 'Active'
+            LIMIT 1
+            """
+            df = run_query(unowned_query)
+            if not df.empty:
+                logger.info(
+                    "resolve_account_name: matched '%s' → '%s' (not in owner ledger — ledger may be stale)",
+                    business_name, df.iloc[0]["account_name"],
+                )
         if df.empty:
             # Strategy 2: Fuzzy match using Snowflake JAROWINKLER_SIMILARITY
             logger.debug("resolve_account_name: no exact match for '%s', trying fuzzy", business_name)
@@ -65,7 +104,7 @@ def resolve_account_name(conn, business_name: str, user_id: str | None = None) -
                   WHERE date_day = CURRENT_DATE - 1
                     AND owner_name = '{owner_name}'
               )
-              AND JAROWINKLER_SIMILARITY(LOWER(sa.account_name), LOWER('{safe_name}')) >= 70
+              AND JAROWINKLER_SIMILARITY(LOWER(sa.account_name), LOWER('{safe_name}')) >= 82
             ORDER BY score DESC
             LIMIT 1
             """

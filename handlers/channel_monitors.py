@@ -15,12 +15,14 @@ from jobs.email_drafters import (
     handle_large_decline_alert,
     handle_fundraise_alert,
     handle_auto_card_alert,
+    handle_rclip_alert,
+    handle_am_escalation_alert,
 )
 
 logger = logging.getLogger(__name__)
 
-# How far back to look on startup (48 hours)
-BACKFILL_LOOKBACK_SECONDS = 48 * 3600
+# How far back to look on startup and catch-up (72 hours — covers weekends)
+BACKFILL_LOOKBACK_SECONDS = 72 * 3600
 
 # Channel ID → handler mapping, populated at startup
 _channel_handlers = {}
@@ -30,7 +32,8 @@ _channel_ids_by_key = {}
 
 # Regex to extract Account Manager Slack user ID from alert messages.
 # Matches lines like "Account Manager: <@U06DAFU4YRG>"
-_AM_LINE_RE = re.compile(r"\*?Account Manager:?\*?\s*<@(U[A-Z0-9]+)>")
+_AM_LINE_RE = re.compile(r"\*?Account Manager(?:\s*/\s*CSM)?:?\*?\s*<@(U[A-Z0-9]+)(?:\|[^>]*)?>")
+
 
 
 def _is_alert_for_user(text: str, slack_id: str) -> bool:
@@ -62,13 +65,28 @@ def resolve_channel_ids(client):
     """Resolve channel names to IDs and build handler mapping."""
     global _channel_handlers, _channel_ids_by_key
     try:
-        # Fetch both public and private channels
+        # Build set of names we need to find
+        needed = set(ALERT_CHANNELS.values())
+
+        # Fetch both public and private channels with pagination
         channels = {}
         for channel_type in ("public_channel", "private_channel"):
             try:
-                result = client.conversations_list(types=channel_type, limit=1000)
-                for c in result.get("channels", []):
-                    channels[c["name"]] = c["id"]
+                cursor = None
+                while True:
+                    kwargs = {"types": channel_type, "limit": 1000, "exclude_archived": True}
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    result = client.conversations_list(**kwargs)
+                    for c in result.get("channels", []):
+                        if c["name"] in needed:
+                            channels[c["name"]] = c["id"]
+                    # Stop early if we found all channels
+                    if needed <= set(channels.keys()):
+                        break
+                    cursor = result.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
+                        break
             except Exception:
                 pass
 
@@ -79,6 +97,8 @@ def resolve_channel_ids(client):
             "large_decline": handle_large_decline_alert,
             "fundraise": handle_fundraise_alert,
             "auto_card": handle_auto_card_alert,
+            "rclip": handle_rclip_alert,
+            "am_escalation": handle_am_escalation_alert,
         }
 
         for key, handler in mapping.items():
@@ -115,8 +135,13 @@ def register_channel_listeners(app):
             channel_type, channel_id, user, subtype, (text or "")[:80],
         )
 
-        # Skip bot's own messages, edits, deletes
-        if event.get("bot_id") or subtype in ("message_changed", "message_deleted"):
+        # Skip edits and deletes
+        if subtype in ("message_changed", "message_deleted"):
+            return
+
+        # For monitored channels, allow bot messages through (alerts come from bots)
+        is_monitored = channel_id in _channel_handlers
+        if event.get("bot_id") and not is_monitored:
             return
         if subtype and subtype != "bot_message":
             return
@@ -265,6 +290,8 @@ _CHANNEL_KEYWORDS = {
     "procurement_trial": ["procurement", "procurement trial", "self-serve procurement"],
     "fundraise": ["fundraise", "fundraising", "funding round", "funding event"],
     "auto_card": ["auto card", "automatic card", "card loss", "card losses", "auto card loss"],
+    "rclip": ["rclip", "reactive clip", "reactive limit"],
+    "am_escalation": ["escalation", "am escalation", "cx escalation", "support escalation"],
 }
 
 _JOB_KEYWORDS = {
@@ -287,6 +314,10 @@ _JOB_KEYWORDS = {
     "post_meeting_followup": ["gong follow-up", "gong followup", "gong transcript", "missing follow-up", "missing followup", "follow-up check", "followup check", "did i follow up"],
     "bill_drafter": ["bill drafter", "bill draft", "card payable", "ach draft", "draft bills"],
     "auto_card_drafter": ["auto card drafter", "auto card draft", "automatic card draft", "card loss draft"],
+    "pclip_drafter": ["pclip drafter", "pclip draft", "limit increase draft"],
+    "rclip_drafter": ["rclip drafter", "rclip draft", "reactive clip draft"],
+    "escalation_drafter": ["escalation drafter", "escalation draft", "am escalation draft"],
+    "activation_alerts": ["treasury activation", "new treasury", "investment account", "first bill", "first bill created", "activation alerts"],
     "status": ["status", "health", "health check", "are you working", "you alive", "you up"],
     "help": ["help", "what can you do", "capabilities", "commands", "how do i"],
     "test": ["test", "test everything", "run test", "full test"],
@@ -528,6 +559,42 @@ def _run_job_on_demand(job_key, client, dm_channel, user_id=None):
                     channel=dm_channel,
                     text=f"Auto card drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
                 )
+        elif job_key == "pclip_drafter":
+            processed = run_pclip_sweep(client, user_id=user_id, lookback_hours=2.0)
+            if processed == 0:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text="No new unprocessed alerts in #alerts-pclip-activations (last 2h).",
+                )
+            else:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text=f"PCLIP drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
+                )
+        elif job_key == "rclip_drafter":
+            processed = run_rclip_sweep(client, user_id=user_id, lookback_hours=2.0)
+            if processed == 0:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text="No new unprocessed alerts in #alerts-rclip-requests (last 2h).",
+                )
+            else:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text=f"RCLIP drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
+                )
+        elif job_key == "escalation_drafter":
+            processed = run_escalation_sweep(client, user_id=user_id, lookback_hours=2.0)
+            if processed == 0:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text="No new unprocessed alerts in #am-escalations (last 2h).",
+                )
+            else:
+                client.chat_postMessage(
+                    channel=dm_channel,
+                    text=f"Escalation drafter complete — {processed} draft{'s' if processed != 1 else ''} created.",
+                )
         elif job_key == "flush_drafts":
             from utils.pending_drafts import flush_to_gmail, list_pending
             pending = list_pending(user_id=user_id)
@@ -562,10 +629,10 @@ def _run_job_on_demand(job_key, client, dm_channel, user_id=None):
                     draft_msg += f", {failed} failed"
             else:
                 draft_msg = "\n:email: *Pending drafts:* none queued"
-            # 2. Backfill channel alerts (last 24h)
+            # 2. Backfill channel alerts (last 72h)
             backfill_count = 0
             try:
-                backfill_missed_messages(client, lookback_seconds=24 * 3600)
+                backfill_missed_messages(client, lookback_seconds=72 * 3600)
                 backfill_count = 1  # at least ran
             except Exception as e:
                 logger.warning("Catchup backfill failed: %s", e)
@@ -577,7 +644,7 @@ def _run_job_on_demand(job_key, client, dm_channel, user_id=None):
                 logger.warning("Catchup priorities failed: %s", e)
             client.chat_postMessage(
                 channel=dm_channel,
-                text=f"Catch-up complete.{draft_msg}\n:arrows_counterclockwise: *Channel alerts:* backfilled last 24h\n:bar_chart: *Priorities:* refreshed",
+                text=f"Catch-up complete.{draft_msg}\n:arrows_counterclockwise: *Channel alerts:* backfilled last 72h\n:bar_chart: *Priorities:* refreshed",
             )
         elif job_key == "status":
             from jobs.status import run_status
@@ -588,6 +655,13 @@ def _run_job_on_demand(job_key, client, dm_channel, user_id=None):
         elif job_key == "test":
             from jobs.status import run_test
             run_test(client, user_id=user_id)
+        elif job_key == "activation_alerts":
+            from jobs.activation_alerts import run_activation_alerts
+            client.chat_postMessage(
+                channel=dm_channel,
+                text="Checking for new treasury, investment, and first-bill activations...",
+            )
+            run_activation_alerts(client, user_id=user_id)
     except Exception as e:
         client.chat_postMessage(
             channel=dm_channel,
@@ -816,7 +890,8 @@ Keep responses under 200 words. Be direct and sales-focused."""
 _CATEGORY_KEYWORDS = {
     "close_now": ["close now", "close today", "close asap", "ready to close"],
     "zero_to_one": ["zero to one", "0 to 1", "zero-to-one", "activations", "new activation"],
-    "prospect": ["prospect", "prospecting", "no opp", "without opp", "pacing well"],
+    "prospect": ["no opp", "without opp", "pacing well"],
+    "prospecting_signals": ["prospect", "prospecting", "prospects", "signal plays", "untouched"],
     "followup": ["follow up", "follow-up", "followup", "follow ups"],
     "post_meeting_opp": ["post meeting", "post-meeting", "post meeting opp", "discussed on call"],
     "stale": ["stale", "stale opp", "stale opps", "re-engage", "reengage"],
@@ -835,6 +910,11 @@ def _detect_category_intent(text: str):
 
 def _send_dm_category_detail(client, dm_channel, category: str, user_id: str = None):
     """Send Level 2 priority actions detail for a category via DM."""
+    # Route "prospecting_signals" to the new prospecting system
+    if category == "prospecting_signals":
+        _send_dm_prospecting_signals(client, dm_channel, user_id=user_id)
+        return
+
     from jobs.priority_actions import build_category_detail_blocks, get_cached_category
 
     # If cache is empty, run priority actions first to populate it
@@ -862,6 +942,65 @@ def _send_dm_category_detail(client, dm_channel, category: str, user_id: str = N
         channel=dm_channel,
         blocks=blocks,
         text=f"Priority Actions — {title}",
+    )
+
+
+def _send_dm_prospecting_signals(client, dm_channel, user_id: str = None):
+    """Send prospecting signal plays as a DM summary."""
+    from jobs.prospecting_signals import gather_prospecting_signals, SIGNAL_META
+    from config import SF_BASE_URL
+
+    client.chat_postMessage(
+        channel=dm_channel,
+        text=":mag: Gathering prospecting signals... one moment.",
+    )
+
+    items = gather_prospecting_signals(user_id=user_id)
+    if not items:
+        client.chat_postMessage(
+            channel=dm_channel,
+            text="_No untouched signal matches right now. All accounts have been contacted recently._",
+        )
+        return
+
+    # Group by signal type
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for item in items:
+        grouped[item["signal_key"]].append(item)
+
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": "Prospecting — Untouched Signal Plays", "emoji": True}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": f"{len(items)} accounts across {len(grouped)} plays · 30+ days since last outbound"}]},
+    ]
+
+    for signal_key, accts in grouped.items():
+        meta = SIGNAL_META.get(signal_key, {})
+        emoji = meta.get("emoji", ":mag:")
+        label = meta.get("label", signal_key)
+
+        lines = [f"{emoji} *{label}* ({len(accts)})"]
+        for a in accts[:8]:
+            sf_link = f"{SF_BASE_URL}/r/Account/{a['account_id']}/view" if a.get("account_id") else ""
+            name_str = f"<{sf_link}|{a['account']}>" if sf_link else a["account"]
+            lines.append(f"• {name_str} — {a['signal_detail']} · {a['days_since_touch']}d stale")
+        if len(accts) > 8:
+            lines.append(f"_...and {len(accts) - 8} more_")
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        blocks.append({"type": "divider"})
+
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "_Open :house: Home tab → :mag: Prospecting for one-click draft buttons_"}]})
+
+    # Slack max 50 blocks per message
+    if len(blocks) > 49:
+        blocks = blocks[:48]
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": "_Truncated — open Prospecting tab for full list_"}]})
+
+    client.chat_postMessage(
+        channel=dm_channel,
+        blocks=blocks,
+        text=f"Prospecting: {len(items)} untouched signal matches",
     )
 
 
@@ -990,6 +1129,77 @@ def run_auto_card_sweep(client, user_id=None, lookback_hours: float = 2.0):
         processed, skipped, len(messages), lookback_hours,
     )
     return processed
+
+
+def _generic_sweep(channel_key, handler, client, user_id=None, lookback_hours=2.0):
+    """Generic sweep for any monitored channel — reusable pattern."""
+    channel_id = _channel_ids_by_key.get(channel_key)
+    if not channel_id:
+        logger.warning("%s sweep: channel not resolved", channel_key)
+        return 0
+
+    channel_name = ALERT_CHANNELS[channel_key]
+    oldest = str(time.time() - lookback_hours * 3600)
+    processed = 0
+    skipped = 0
+
+    try:
+        all_messages = []
+        cursor = None
+        while True:
+            kwargs = {"channel": channel_id, "oldest": oldest, "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            result = client.conversations_history(**kwargs)
+            all_messages.extend(result.get("messages", []))
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+        messages = all_messages
+    except Exception as e:
+        logger.error("%s sweep: failed to read %s: %s", channel_key, channel_name, e)
+        return 0
+
+    for msg in messages:
+        text = msg.get("text", "")
+        ts = msg.get("ts", "")
+
+        alert_owner = _find_alert_owner(text)
+        if not alert_owner:
+            continue
+
+        dedup_key = f"channel_{channel_id}_{ts}"
+        if tracker.is_processed(dedup_key):
+            skipped += 1
+            continue
+
+        try:
+            handler(text, ts, client, user_id=alert_owner)
+            tracker.mark_processed(dedup_key)
+            processed += 1
+        except Exception as e:
+            logger.error("%s sweep: failed to process ts=%s: %s", channel_key, ts, e)
+
+    logger.info(
+        "%s sweep: processed=%d skipped=%d total=%d (last %.0fh)",
+        channel_key, processed, skipped, len(messages), lookback_hours,
+    )
+    return processed
+
+
+def run_pclip_sweep(client, user_id=None, lookback_hours: float = 2.0):
+    """Sweep #alerts-pclip-activations for unprocessed PCLIP alerts."""
+    return _generic_sweep("pclip", handle_pclip_alert, client, user_id, lookback_hours)
+
+
+def run_rclip_sweep(client, user_id=None, lookback_hours: float = 2.0):
+    """Sweep #alerts-rclip-requests for unprocessed RCLIP alerts."""
+    return _generic_sweep("rclip", handle_rclip_alert, client, user_id, lookback_hours)
+
+
+def run_escalation_sweep(client, user_id=None, lookback_hours: float = 2.0):
+    """Sweep #am-escalations for unprocessed AM escalation alerts."""
+    return _generic_sweep("am_escalation", handle_am_escalation_alert, client, user_id, lookback_hours)
 
 
 def backfill_missed_messages(client, lookback_seconds: int | None = None):

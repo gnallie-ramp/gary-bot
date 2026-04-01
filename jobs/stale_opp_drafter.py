@@ -193,6 +193,12 @@ def run_stale_opp_drafter(client, user_id=None):
                     em = c["email"].lower()
                     if em in engaged_emails and em != contact_email.lower():
                         cc_emails.append(c["email"])
+            # Domain-match guard: only CC contacts whose domain matches TO
+            to_domain = contact_email.lower().split("@")[-1] if "@" in contact_email else ""
+            cc_emails = [
+                e for e in cc_emails
+                if not to_domain or e.lower().split("@")[-1] == to_domain
+            ]
             cc_string = ", ".join(cc_emails[:3])
 
             if not contact_email:

@@ -27,6 +27,14 @@ def _run_sf(*args, timeout: int = 30) -> dict:
         parsed = json.loads(result.stdout) if result.stdout else {}
         if result.returncode != 0:
             err_msg = parsed.get("message", result.stderr or "Unknown error")
+            # Extract field-level errors from data array (SF "Multiple errors")
+            data = parsed.get("data", []) or parsed.get("result", {}).get("errors", [])
+            if data and isinstance(data, list):
+                details = "; ".join(
+                    e.get("message", str(e)) if isinstance(e, dict) else str(e)
+                    for e in data[:5]
+                )
+                err_msg = f"{err_msg} [{details}]"
             raise RuntimeError(f"sf CLI error: {err_msg}")
         return parsed
     except subprocess.TimeoutExpired:

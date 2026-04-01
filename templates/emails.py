@@ -410,3 +410,72 @@ reply works great:</p>
 <p>{_name}<br>{rep_title}</p>"""
 
     return _wrap(body, _sig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. RCLIP (Reactive Credit Limit Increase)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def rclip_email(
+    first_name: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
+    """Draft for reactive credit limit increase — AM intro + ideas to use new limit."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+
+    body = f"""\
+<p>Hi {first_name},</p>
+
+<p>I wanted to introduce myself as your Account Manager at Ramp! I saw your \
+limit increase just went through and wanted to share a few ideas to make the \
+most of it:</p>
+
+<ul style="padding-left:20px;">
+  <li style="margin-bottom:6px;">Migrate any personal reimbursements to Ramp \
+cards for control &amp; cashback</li>
+  <li style="margin-bottom:6px;">Consolidate spend from other cards into Ramp \
+for automation &amp; eliminate unnecessary systems/workflows</li>
+  <li style="margin-bottom:6px;">Pay vendors via Ramp card instead of ACH/wire \
+for cashback &amp; better terms</li>
+</ul>
+
+<p>If you want to <a href="{_booking}" style="color:#1155CC;">schedule a \
+call</a>, I can run a vendor audit to see which vendors that you're paying \
+via ACH or wire may accept card payments with no additional fees. We can also \
+talk about some improvements to your Ramp setup to put you in a good position \
+to scale and make sure you're using Ramp to its fullest potential.</p>
+
+<p>Looking forward to hearing from you!</p>
+
+<p>Thanks,<br>{_name}</p>"""
+
+    return _wrap(body, _sig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. AM Escalation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def am_escalation_email(
+    first_name: str,
+    escalation_context: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
+    """Draft for CX-to-AM escalation — contextual intro based on ticket."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+
+    body = f"""\
+<p>Hi{' ' + first_name if first_name and first_name != 'there' else ''}, \
+great to meet you — our support team let me know {escalation_context}. \
+Could you <a href="{_booking}" style="color:#1155CC;">select a time through \
+this link</a> and we'll chat through it?</p>
+
+<p>Thanks!</p>
+
+<p>{_name}</p>"""
+
+    return _wrap(body, _sig)

@@ -57,6 +57,8 @@ ALERT_CHANNELS = {
     "large_decline": "alerts-large-declines",
     "fundraise": "alerts-fundraising",
     "auto_card": "bill-pay-automatic-card-losses",
+    "rclip": "alerts-rclip-requests",
+    "am_escalation": "am-escalations",
 }
 
 # ── Snowflake (via snow CLI + SSO — no PAT/VPN needed) ───────────────────────

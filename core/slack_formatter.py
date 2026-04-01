@@ -241,7 +241,7 @@ def drafter_confirmation_blocks(drafter_type, account_name, details, draft_id=No
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"\u2709\ufe0f {drafter_type} Draft — {account_name}",
+                "text": f"\u2709\ufe0f {drafter_type} Draft — {account_name}"[:150],
                 "emoji": True,
             },
         },

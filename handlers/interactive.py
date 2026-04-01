@@ -818,6 +818,27 @@ def register_interactive_handlers(app):
             )
             return
 
+        # Procurement trial uses fixed template (matches channel alert), not Claude-generated
+        if category == "prospect_active_procurement_trial":
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"Drafting procurement trial email for *{account_name}*...",
+            )
+
+            def _run_procurement():
+                with _draft_semaphore:
+                    try:
+                        _draft_procurement_trial_template(account_id, account_name, client, user_id=user_id)
+                    except Exception as e:
+                        logger.error("Procurement trial draft failed for %s: %s", account_name, e)
+                        client.chat_postMessage(
+                            channel=user_id,
+                            text=f"Failed to draft email for *{account_name}*: {e}",
+                        )
+
+            threading.Thread(target=_run_procurement, daemon=True).start()
+            return
+
         client.chat_postMessage(
             channel=user_id,
             text=f"Drafting outreach email for *{account_name}*... gathering context (~15 sec).",
@@ -1257,6 +1278,98 @@ def _send_category_detail(client, category: str, user_id=None):
     )
 
 
+# ── Procurement Trial Template Drafter ──────────────────────────────────────
+
+
+def _draft_procurement_trial_template(account_id, account_name, client, user_id=None):
+    """Draft a procurement trial email using the fixed template (same as channel alert).
+
+    Fetches contacts from SFDC, builds greeting, and uses the standard
+    procurement_trial_email template — no Claude generation, no context gathering.
+    """
+    dm_target = user_id or GREG_SLACK_ID
+    from templates.emails import procurement_trial_email
+    from utils.account_resolver import fetch_contact_emails, is_hash_like
+    from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
+    from core.slack_formatter import drafter_confirmation_blocks
+    from core.user_registry import get_user_first_name
+
+    # Fetch contacts
+    contacts_map = fetch_contact_emails(None, [account_id])
+    acct_contacts = contacts_map.get(account_id, [])
+
+    # Filter out hash-like names and contacts without emails
+    valid = [c for c in acct_contacts if c.get("email") and not is_hash_like(c.get("name", ""))]
+    if not valid:
+        client.chat_postMessage(
+            channel=dm_target,
+            text=f"No contact email found for *{account_name}*. Add a contact in Salesforce first.",
+        )
+        return
+
+    # Build recipient list — domain-match guard to avoid CC'ing wrong companies
+    primary_domain = valid[0]["email"].lower().split("@")[-1] if "@" in valid[0]["email"] else ""
+    domain_matched = [valid[0]]
+    for c in valid[1:]:
+        em = c["email"].lower()
+        d = em.split("@")[-1] if "@" in em else ""
+        if primary_domain and d and d != primary_domain:
+            continue
+        domain_matched.append(c)
+        if len(domain_matched) >= 4:
+            break
+    to_emails = ", ".join(c["email"] for c in domain_matched)
+    first_names = [c.get("name", "").split()[0] for c in domain_matched if c.get("name")]
+    if len(first_names) == 0:
+        greeting = "Hi there,"
+    elif len(first_names) == 1:
+        greeting = f"Hi {first_names[0]},"
+    elif len(first_names) == 2:
+        greeting = f"Hi {first_names[0]} and {first_names[1]},"
+    else:
+        greeting = f"Hi {', '.join(first_names[:-1])}, and {first_names[-1]},"
+
+    html_body = procurement_trial_email(greeting=greeting, user_id=user_id)
+    subject = "Ramp Procurement Trial + AM intro"
+    draft_label = "Claude Drafts/Procurement Trials"
+
+    draft_id = ""
+    if gumstack_ok():
+        result = gumstack_create(
+            to=to_emails, subject=subject, html_body=html_body,
+            cc="", label=draft_label, user_id=user_id,
+        )
+        if result["success"]:
+            draft_id = result["draft_id"]
+        else:
+            logger.warning("Gumstack draft failed for %s, falling back to queue", account_name)
+
+    if not draft_id:
+        from utils.pending_drafts import save_draft as save_pending_draft
+        draft_id = f"pending_procurement_{account_id}_{int(time.time())}"
+        save_pending_draft(
+            draft_id=draft_id, to=to_emails, cc="",
+            subject=subject, html_body=html_body,
+            account_name=account_name, label=draft_label, user_id=user_id or "",
+        )
+
+    details = (
+        f"*To:* {to_emails}\n"
+        f"*Subject:* {subject}\n"
+        f"*Account:* {account_name} — Procurement Trial"
+    )
+    blocks = drafter_confirmation_blocks(
+        drafter_type="Procurement Trial",
+        account_name=account_name,
+        details=details,
+        draft_id=draft_id,
+    )
+    client.chat_postMessage(
+        channel=dm_target, blocks=blocks,
+        text=f"Procurement Trial draft ready for {account_name}",
+    )
+
+
 # ── Smart Email Drafter ─────────────────────────────────────────────────────
 
 
@@ -1435,15 +1548,22 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     contact_name = primary.get("name", "")
     contact_title = primary.get("title", "")
 
-    # CC = all other SFDC contacts (up to 3), deduplicated by email.
-    # Always include owners + admins regardless of engagement score.
+    # CC = other SFDC contacts (up to 3), deduplicated by email.
+    # Domain-match guard: only CC contacts whose email domain matches the TO
+    # contact's domain to avoid emailing wrong-company contacts on the account.
     cc_contacts = []
     seen_emails = {contact_email.lower()}
+    to_domain = contact_email.lower().split("@")[-1] if "@" in contact_email else ""
     for c, s in scored[1:]:
         em = c["email"].lower()
-        if em not in seen_emails:
-            cc_contacts.append(c)
-            seen_emails.add(em)
+        cc_domain = em.split("@")[-1] if "@" in em else ""
+        if em in seen_emails:
+            continue
+        if to_domain and cc_domain and cc_domain != to_domain:
+            logger.debug("CC skip %s: domain %s != TO domain %s", em, cc_domain, to_domain)
+            continue
+        cc_contacts.append(c)
+        seen_emails.add(em)
         if len(cc_contacts) >= 3:
             break
     cc_string = ", ".join(c["email"] for c in cc_contacts)
@@ -1522,6 +1642,69 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
             "There is no open opportunity yet"
         )
         tone_note = "Lead with their success/growth on Ramp, then offer to help them optimize or expand."
+    elif category == "prospect_tts_plus_procurement":
+        goal = (
+            "pitch Ramp Plus or Procurement — this account has a high propensity to adopt these products "
+            "based on their usage patterns and profile. Frame it as unlocking more value from their existing Ramp setup"
+        )
+        tone_note = "Lead with how Plus/Procurement would help them based on their current usage. Don't hard-sell — ask discovery questions."
+    elif category == "prospect_high_competitor_spend":
+        goal = (
+            "consolidate their spend onto Ramp — this account has significant spending on competitor cards, "
+            "off-ramp bill pay, or unmanaged travel. Position Ramp as a way to get better visibility, "
+            "cashback, and control over all their spend"
+        )
+        tone_note = "Don't trash competitors. Frame as simplifying their stack and getting better economics on spend they're already doing."
+    elif category == "prospect_low_cashback_no_plus":
+        goal = (
+            "discuss optimizing their Ramp economics — this account is on a low cashback rate and not on Plus. "
+            "Plus could unlock better rates and features for their team"
+        )
+        tone_note = "Lead with the value they're leaving on the table. Frame Plus as an upgrade that pays for itself."
+    elif category == "prospect_high_gla_grandfathered":
+        goal = (
+            "re-engage about their Ramp Plus subscription — they were grandfathered when Plus launched "
+            "but didn't convert. With their high GLA balance, treasury features and Plus benefits "
+            "could be very valuable. Treasury is uncapped in H1-26"
+        )
+        tone_note = "Lead with their success on the platform (high balance). Frame Plus as unlocking the next level of value."
+    elif category == "prospect_erp_no_billpay":
+        goal = (
+            "pitch Bill Pay — this account has an integrated ERP/accounting system but isn't using Ramp Bill Pay. "
+            "The ERP integration means bill pay would flow directly into their accounting with zero manual work"
+        )
+        tone_note = "Lead with the accounting integration they already have. Frame bill pay as a natural extension that closes the loop."
+    elif category == "prospect_erp_no_plus":
+        goal = (
+            "pitch Ramp Plus — this account has an integrated ERP but isn't on Plus. "
+            "Plus features like advanced accounting rules, custom workflows, and procurement "
+            "would supercharge their ERP integration"
+        )
+        tone_note = "Lead with their ERP usage. Frame Plus as powering up the integration they already invested in."
+    elif category == "prospect_active_procurement_trial":
+        goal = (
+            "convert their active procurement trial into a paid subscription — they're already using "
+            "procurement features and seeing value. This is the conversion moment"
+        )
+        tone_note = "Reference their trial activity. Ask what they've liked, what's missing. Guide toward paid conversion."
+    elif category == "prospect_new_treasury":
+        goal = (
+            "congratulate them on funding their Ramp treasury account and discuss how to maximize "
+            "their yield and cash management strategy. Treasury is uncapped in H1-26 — huge opportunity"
+        )
+        tone_note = "Celebrate the milestone. Mention competitive yields. Ask about their broader cash management goals and if they'd like a walkthrough of treasury features."
+    elif category == "prospect_new_investment":
+        goal = (
+            "congratulate them on opening their Ramp investment account and discuss how to optimize "
+            "their investment strategy. This shows strong trust in the platform"
+        )
+        tone_note = "Celebrate the milestone. Ask about their investment goals and risk profile. Offer to connect them with resources to maximize returns."
+    elif category == "prospect_first_bill":
+        goal = (
+            "congratulate them on creating their first bill on Ramp and help them ramp up bill pay "
+            "adoption — the first bill is the hardest, now it's about building the habit"
+        )
+        tone_note = "Celebrate the milestone. Ask about their AP workflow and how many vendors they plan to move to Ramp. Offer to help optimize their bill pay setup."
     elif category == "close_window":
         goal = (
             "reach out urgently because their spend is ramping up right now and you need to close "

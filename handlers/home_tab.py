@@ -22,6 +22,7 @@ _TABS = [
     ("dashboard", ":house: Dashboard"),
     ("pipeline", ":dart: Pipeline"),
     ("stale", ":alarm_clock: Stale Opps"),
+    ("prospecting", ":mag: Prospecting"),
     ("meetings", ":calendar: Meetings"),
     ("drafts", ":email: Drafts"),
     ("instructions", ":books: Instructions"),
@@ -52,6 +53,7 @@ def register_home_tab(app):
     def handle_app_home_opened(event, client):
         user_id = event.get("user")
         tab = event.get("tab")
+        logger.info("app_home_opened: user=%s tab=%s", user_id, tab)
         if tab != "home":
             return
 
@@ -63,13 +65,16 @@ def register_home_tab(app):
 
         def _publish():
             try:
+                logger.info("Home tab: building blocks for user=%s", user_id)
                 blocks = _build_home_blocks(client, user_id)
+                logger.info("Home tab: publishing %d blocks for user=%s", len(blocks), user_id)
                 client.views_publish(
                     user_id=user_id,
                     view={"type": "home", "blocks": blocks},
                 )
+                logger.info("Home tab: published successfully for user=%s", user_id)
             except Exception as e:
-                logger.error("Home tab publish failed: %s", e)
+                logger.error("Home tab publish failed for user=%s: %s", user_id, e, exc_info=True)
 
         threading.Thread(target=_publish, daemon=True).start()
 
@@ -157,6 +162,7 @@ def _build_home_blocks(client, user_id):
         "dashboard": _build_dashboard_tab,
         "pipeline": _build_pipeline_tab,
         "stale": _build_stale_tab,
+        "prospecting": _build_prospecting_tab,
         "meetings": _build_meetings_tab,
         "drafts": _build_drafts_tab,
         "instructions": _build_instructions_tab,
@@ -281,10 +287,23 @@ def _fmt_currency(val):
 
 def _build_stale_tab(client, user_id):
     """Stale Opps: Rich cards for opps needing re-engagement, sorted by CP or staleness."""
-    from jobs.priority_actions import get_cached_category
+    from jobs.priority_actions import get_cached_category, _gather_stale_opps, _cached_actions
 
     blocks = []
     items = get_cached_category("stale", user_id=user_id)
+
+    # If cache is empty, populate it directly
+    if not items:
+        try:
+            stale_items = _gather_stale_opps(user_id=user_id)
+            if stale_items:
+                uid = user_id or "default"
+                if uid not in _cached_actions:
+                    _cached_actions[uid] = {}
+                _cached_actions[uid]["stale"] = stale_items
+                items = stale_items
+        except Exception as e:
+            logger.warning("Stale tab: failed to gather stale opps: %s", e)
 
     # Header
     blocks.append({
@@ -436,6 +455,227 @@ def _build_stale_tab(client, user_id):
     blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
 
     return blocks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Prospecting
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-user filter state for prospecting tab
+_prospect_filter = {}  # user_id -> signal_key or "all"
+
+
+def _build_prospecting_tab(client, user_id):
+    """Prospecting: Accounts matching hot signal plays, not contacted in 30+ days."""
+    from jobs.prospecting_signals import (
+        gather_prospecting_signals, get_cached_prospects,
+        SIGNAL_META, MIN_DAYS_UNTOUCHED,
+    )
+
+    blocks = []
+
+    # Try cache first, fall back to live query
+    items = get_cached_prospects(user_id=user_id)
+    if not items:
+        try:
+            items = gather_prospecting_signals(user_id=user_id)
+        except Exception as e:
+            logger.warning("Prospecting tab: failed to gather signals: %s", e)
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:mag: Prospecting — Untouched Signal Plays*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            f"Accounts matching hot signals with no outbound email or call in {MIN_DAYS_UNTOUCHED}+ days. "
+            "Click Draft to create a contextual outreach email."
+        )}],
+    })
+
+    if not items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No untouched signal matches right now — check back after the next refresh._"},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Refresh Now", "emoji": True},
+                "action_id": "prospect_refresh",
+            }],
+        })
+        return blocks
+
+    # Signal filter bar — count by signal type
+    from collections import Counter
+    signal_counts = Counter(i["signal_key"] for i in items)
+    active_filter = _prospect_filter.get(user_id, "all")
+
+    filter_buttons = [{
+        "type": "button",
+        "text": {"type": "plain_text", "text": f"All ({len(items)})", "emoji": True},
+        "action_id": "prospect_filter_all",
+        "style": "primary" if active_filter == "all" else None,
+    }]
+    # Remove None style (Slack doesn't accept it)
+    if filter_buttons[0].get("style") is None:
+        del filter_buttons[0]["style"]
+
+    for key, count in signal_counts.most_common():
+        meta = SIGNAL_META.get(key, {})
+        emoji = meta.get("emoji", ":mag:")
+        label = meta.get("label", key)
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": f"{emoji} {label} ({count})", "emoji": True},
+            "action_id": f"prospect_filter_{key}",
+        }
+        if active_filter == key:
+            btn["style"] = "primary"
+        filter_buttons.append(btn)
+
+    # Slack max 25 elements per actions block — split if needed
+    for i in range(0, len(filter_buttons), 5):
+        blocks.append({"type": "actions", "elements": filter_buttons[i:i+5]})
+
+    # Refresh button
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Refresh", "emoji": True},
+            "action_id": "prospect_refresh",
+        }],
+    })
+
+    # Apply filter
+    if active_filter != "all":
+        filtered = [i for i in items if i["signal_key"] == active_filter]
+    else:
+        filtered = items
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f"_{len(filtered)} account{'s' if len(filtered) != 1 else ''} shown_"}],
+    })
+
+    # Render account cards — limit to 25 to stay under Slack's 100-block cap
+    btn_counter = 0
+    for item in filtered[:25]:
+        btn_counter += 1
+        acct_name = item.get("account", "Unknown")
+        acct_id = item.get("account_id", "")
+        signal_key = item.get("signal_key", "")
+        signal_label = item.get("signal_label", "")
+        signal_detail = item.get("signal_detail", "")
+        days = item.get("days_since_touch", 0)
+        has_opp = item.get("has_open_opp", False)
+        card_l30d = item.get("card_spend_l30d", 0)
+        bp_l30d = item.get("billpay_spend_l30d", 0)
+        competitor_card = item.get("competitor_card_spend", 0)
+        competitor_card_name = item.get("competitor_card_name", "")
+        off_ramp_bp = item.get("off_ramp_bp_spend", 0)
+        bp_competitor_name = item.get("bp_competitor_name", "")
+        unmanaged_travel = item.get("unmanaged_travel_spend", 0)
+        meta = SIGNAL_META.get(signal_key, {})
+        emoji = meta.get("emoji", ":mag:")
+
+        # SFDC link
+        sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+        acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+
+        # Build card text
+        lines = [f"*{acct_str}*"]
+        lines.append(f"{emoji} {signal_label}")
+        if signal_detail:
+            lines.append(f"_{signal_detail}_")
+
+        # Spend context — signal-specific to show relevant metrics
+        spend_parts = []
+        if signal_key == "erp_no_billpay":
+            # Show competitor/off-ramp BP spend (not Ramp BP — that contradicts "no bill pay")
+            if off_ramp_bp > 0:
+                bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
+                spend_parts.append(f"Off-Ramp BP: ${off_ramp_bp:,.0f}/mo{bp_comp_label}")
+            if card_l30d > 0:
+                spend_parts.append(f"Card L30D: ${card_l30d:,.0f}")
+        elif signal_key == "high_competitor_spend":
+            # Show competitor breakdown
+            if competitor_card > 0:
+                cc_label = f" ({competitor_card_name})" if competitor_card_name else ""
+                spend_parts.append(f"Competitor Card: ${competitor_card:,.0f}/mo{cc_label}")
+            if off_ramp_bp > 0:
+                bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
+                spend_parts.append(f"Off-Ramp BP: ${off_ramp_bp:,.0f}/mo{bp_comp_label}")
+            if unmanaged_travel > 0:
+                spend_parts.append(f"Unmanaged Travel: ${unmanaged_travel:,.0f}/mo")
+        else:
+            # Default: show Ramp spend
+            if card_l30d > 0:
+                spend_parts.append(f"Card L30D: ${card_l30d:,.0f}")
+            if bp_l30d > 0:
+                spend_parts.append(f"BP L30D: ${bp_l30d:,.0f}")
+        if spend_parts:
+            lines.append(" · ".join(spend_parts))
+
+        # Touch + opp status
+        status_parts = [f"{days}d since last touch"]
+        if has_opp:
+            status_parts.append("has open opp")
+        lines.append(" · ".join(status_parts))
+
+        card_text = "\n".join(lines)
+        if len(card_text) > 2900:
+            card_text = card_text[:2900] + "..."
+
+        # Draft button payload — uses existing smart drafter
+        payload = json.dumps({
+            "account": acct_name,
+            "account_id": acct_id,
+            "product": "",
+            "category": f"prospect_{signal_key}",
+        })
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": card_text},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":envelope: Draft", "emoji": True},
+                "action_id": f"draft_outreach_prospect_{btn_counter}",
+                "value": payload,
+            },
+        })
+
+        if btn_counter < len(filtered[:25]):
+            blocks.append({"type": "divider"})
+
+    if len(filtered) > 25:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"_Showing 25 of {len(filtered)} — use `/prospects` for full list_"}],
+        })
+
+    blocks.append(_updated_at_block(
+        _prospect_cache_ts(user_id)
+    ))
+
+    return blocks
+
+
+def _prospect_cache_ts(user_id):
+    """Get the timestamp of the prospecting cache for display."""
+    try:
+        from jobs.prospecting_signals import _prospect_cache
+        uid = user_id or "default"
+        entry = _prospect_cache.get(uid)
+        return entry["fetched_at"] if entry else 0
+    except Exception:
+        return 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1688,13 +1928,16 @@ def register_home_tab_actions(app):
 
         def _refresh():
             try:
+                logger.info("Home tab switch: building %s for user=%s", tab_name, user_id)
                 blocks = _build_home_blocks(client, user_id)
+                logger.info("Home tab switch: publishing %d blocks for user=%s", len(blocks), user_id)
                 client.views_publish(
                     user_id=user_id,
                     view={"type": "home", "blocks": blocks},
                 )
+                logger.info("Home tab switch: published %s successfully for user=%s", tab_name, user_id)
             except Exception as e:
-                logger.error("Home tab switch failed: %s", e)
+                logger.error("Home tab switch failed for user=%s tab=%s: %s", user_id, tab_name, e, exc_info=True)
 
         threading.Thread(target=_refresh, daemon=True).start()
 
@@ -1719,6 +1962,59 @@ def register_home_tab_actions(app):
                 )
             except Exception as e:
                 logger.error("Stale sort toggle failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Prospecting tab: filter buttons ──────────────────────────────────
+    @app.action({"action_id": re.compile(r"^prospect_filter_")})
+    def handle_prospect_filter(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        action_id = action.get("action_id", "")
+        filter_key = action_id.replace("prospect_filter_", "", 1)
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        _prospect_filter[user_id] = filter_key
+        _active_tab[user_id] = "prospecting"
+
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(
+                    user_id=user_id,
+                    view={"type": "home", "blocks": blocks},
+                )
+            except Exception as e:
+                logger.error("Prospect filter toggle failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action("prospect_refresh")
+    def handle_prospect_refresh(ack, body, client):
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _active_tab[user_id] = "prospecting"
+
+        client.chat_postMessage(
+            channel=user_id,
+            text=":arrows_counterclockwise: Refreshing prospecting signals... this takes ~30 seconds.",
+        )
+
+        def _refresh():
+            try:
+                from jobs.prospecting_signals import gather_prospecting_signals
+                gather_prospecting_signals(user_id=user_id, force=True)
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(
+                    user_id=user_id,
+                    view={"type": "home", "blocks": blocks},
+                )
+            except Exception as e:
+                logger.error("Prospect refresh failed: %s", e)
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f"Prospecting refresh failed: {e}",
+                )
 
         threading.Thread(target=_refresh, daemon=True).start()
 

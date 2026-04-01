@@ -217,6 +217,10 @@ def _check_alert_channels(client, gap_hours):
         "procurement_trial": "\U0001f6d2 Procurement Trial",
         "pclip": "\u26a1 PCLIP Activation",
         "large_decline": "\u274c Large Decline",
+        "fundraise": "\U0001f4b0 Fundraise",
+        "auto_card": "\U0001f4b3 Automatic Card",
+        "rclip": "\U0001f4c8 RCLIP",
+        "am_escalation": "\U0001f4e8 AM Escalation",
     }
 
     all_alerts = []

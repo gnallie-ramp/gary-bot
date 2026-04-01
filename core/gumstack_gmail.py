@@ -41,6 +41,9 @@ _LABEL_NAMES = [
     "Claude Drafts/PCLIP Activation",
     "Claude Drafts/Prospecting",
     "Claude Drafts/Fundraise",
+    "Claude Drafts/Automatic Card",
+    "Claude Drafts/RCLIP",
+    "Claude Drafts/AM Escalation",
 ]
 DEFAULT_LABEL_NAME = "Claude Drafts/Prospecting"
 

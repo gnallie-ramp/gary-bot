@@ -113,7 +113,12 @@ def _start_scheduler():
     from jobs.post_meeting_followup import run_post_meeting_followup
     from jobs.granola_followup import run_granola_followup
     from jobs.acceleration_alert import run_acceleration_alert
-    from handlers.channel_monitors import run_bill_drafter_sweep, run_auto_card_sweep
+    from jobs.prospecting_signals import run_prospecting_refresh
+    from jobs.activation_alerts import run_activation_alerts
+    from handlers.channel_monitors import (
+        run_bill_drafter_sweep, run_auto_card_sweep,
+        run_pclip_sweep, run_rclip_sweep, run_escalation_sweep,
+    )
     # from jobs.auth_alert import run_auth_alert  # DISABLED
     from jobs.draft_reminder import run_draft_reminder
     from jobs.quota_insights import run_quota_insights
@@ -259,6 +264,48 @@ def _start_scheduler():
         CronTrigger(day_of_week="mon-fri", hour="8-18", minute="0,30"),
         id="auto_card_sweep",
         name="Auto Card Sweep",
+    )
+
+    # PCLIP sweep: Every 30 min, weekdays 8AM-6PM PT
+    scheduler.add_job(
+        _wrap(run_pclip_sweep),
+        CronTrigger(day_of_week="mon-fri", hour="8-18", minute="0,30"),
+        id="pclip_sweep",
+        name="PCLIP Sweep",
+    )
+
+    # RCLIP sweep: Every 30 min, weekdays 8AM-6PM PT
+    scheduler.add_job(
+        _wrap(run_rclip_sweep),
+        CronTrigger(day_of_week="mon-fri", hour="8-18", minute="0,30"),
+        id="rclip_sweep",
+        name="RCLIP Sweep",
+    )
+
+    # AM Escalation sweep: Every 30 min, weekdays 8AM-6PM PT
+    scheduler.add_job(
+        _wrap(run_escalation_sweep),
+        CronTrigger(day_of_week="mon-fri", hour="8-18", minute="0,30"),
+        id="escalation_sweep",
+        name="AM Escalation Sweep",
+    )
+
+    # Prospecting signal refresh: Daily 8:15 AM PT
+    # Surfaces accounts matching hot plays not contacted in 30+ days
+    scheduler.add_job(
+        _wrap(run_prospecting_refresh),
+        CronTrigger(day_of_week="mon-fri", hour=8, minute=15),
+        id="prospecting_refresh",
+        name="Prospecting Signal Refresh",
+    )
+
+    # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
+    # Detects new treasury, investment, first bill activations and DMs immediately
+    scheduler.add_job(
+        _wrap(run_activation_alerts),
+        CronTrigger(day_of_week="mon-fri", hour="8-18", minute=0),
+        id="activation_alerts",
+        name="Activation Alerts",
     )
 
     # Pre-meeting auto-brief: Every 30 min, weekdays 7AM-6PM PT

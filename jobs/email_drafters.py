@@ -20,6 +20,8 @@ from templates.emails import (
     large_decline_case_b_email,
     fundraise_email,
     auto_card_loss_email,
+    rclip_email,
+    am_escalation_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -437,21 +439,35 @@ def handle_pclip_alert(text, ts, client, user_id=None):
     """Parse a PCLIP activation alert and create a Gmail draft.
 
     Skips drafting if the limit increase is less than $100,000.
+
+    Actual alert format (Slack mrkdwn):
+        Proactive Clip Request activated
+        > *Business Name:* Acme Corp
+        > *Accepted by:* Jane Doe
+        > *Business Owner Email:* owner@acme.com
+        > *New Limit Amount:* $500,000.00
+        > *Old Limit Amount:* $100,000.00
+        > *Is Limit Fixed?:* False
+        > *Account Manager:* <@U06DAFU4YRG|Greg>
     """
     try:
+        # ── Strip Slack bold markers for easier parsing ────────────────────
+        clean = re.sub(r'\*([A-Za-z /]+(?:\(s\))?):?\*', r'\1:', text)
+
         # ── Extract fields ────────────────────────────────────────────────
-        company_name = _extract_field(r'Company:\s*(.+)', text, "Unknown Company")
+        company_name = _extract_field(
+            r'Business Name:\s*(.+)', clean, "Unknown Company"
+        )
 
-        # Accepting user
-        accepting_block = _extract_field(r'Accepting User:\s*(.+)', text, "")
-        accepting_user = _extract_name_email(accepting_block)
+        # Accepting user (may be just a name, no email in PCLIP alerts)
+        accepted_by = _extract_field(r'Accepted by:\s*(.+)', clean, "")
 
-        # Limits — numbers with optional commas / dollar signs
+        # Limits — numbers with optional commas / dollar signs / decimals
         old_limit_raw = _extract_field(
-            r'(?:Old|Previous|Prior)\s*Limit:\s*\$?([\d,]+)', text, "0"
+            r'Old Limit(?:\s*Amount)?:\s*\$?([\d,]+)', clean, "0"
         )
         new_limit_raw = _extract_field(
-            r'(?:New|Updated|Current)\s*Limit:\s*\$?([\d,]+)', text, "0"
+            r'New Limit(?:\s*Amount)?:\s*\$?([\d,]+)', clean, "0"
         )
 
         old_limit = int(old_limit_raw.replace(",", ""))
@@ -461,42 +477,41 @@ def handle_pclip_alert(text, ts, client, user_id=None):
         # ── Threshold filter ──────────────────────────────────────────────
         if limit_increase < 100_000:
             logger.info(
-                "PCLIP alert (ts=%s): increase $%s < $100k threshold, skipping",
+                "PCLIP alert (ts=%s): increase $%s < $100k threshold, skipping silently",
                 ts, f"{limit_increase:,}",
-            )
-            _dm_greg(
-                client,
-                drafter_confirmation_blocks(
-                    drafter_type="PCLIP",
-                    account_name=company_name,
-                    details=(
-                        f"*Skipped* — limit increase {_format_dollars(limit_increase)} "
-                        f"is below the $100,000 threshold.\n"
-                        f"*Old:* {_format_dollars(old_limit)}  |  "
-                        f"*New:* {_format_dollars(new_limit)}"
-                    ),
-                ),
-                user_id=user_id,
             )
             return
 
-        # Business Owner
-        biz_owner_block = _extract_field(r'Business Owner:\s*(.+)', text, "")
-        biz_owner = _extract_name_email(biz_owner_block)
-
-        # Admin contacts
-        admin_block = _extract_field(
-            r'Admin(?:\s*Contact)?s?:\s*([\s\S]+?)(?:\n\n|\Z)', text, ""
+        # Business Owner Email (may be just an email, no name)
+        biz_owner_email_raw = _extract_field(
+            r'Business Owner Email:\s*(.+)', clean, ""
         )
-        admin_contacts = _extract_all_name_emails(admin_block) if admin_block else []
+        biz_owner_email = _strip_slack_email(biz_owner_email_raw) if biz_owner_email_raw else ""
 
-        # ── Build recipients ──────────────────────────────────────────────
+        # Build contacts — PCLIP alerts may only have the Business Owner Email
         contacts = []
-        if accepting_user.get("email"):
-            contacts.append(accepting_user)
-        if biz_owner.get("email"):
-            contacts.append(biz_owner)
-        contacts.extend(admin_contacts)
+        if biz_owner_email:
+            # Try to get first name from the email local part
+            local = biz_owner_email.split("@")[0]
+            first_guess = local.split(".")[0].capitalize() if "." in local else ""
+            contacts.append({
+                "name": "", "email": biz_owner_email,
+                "first_name": first_guess,
+            })
+        # Also check for accepted_by (may have email via mailto)
+        if accepted_by:
+            accepted_contact = _extract_name_email(accepted_by)
+            if not accepted_contact.get("email"):
+                # Try raw email extraction from the field
+                email_match = re.search(r'[\w.+-]+@[\w.-]+\.\w+', accepted_by)
+                if email_match:
+                    accepted_contact = {
+                        "name": "", "email": email_match.group(0),
+                        "first_name": "",
+                    }
+            if accepted_contact.get("email"):
+                contacts.append(accepted_contact)
+
         contacts = _dedup_contacts(contacts)
 
         if not contacts:
@@ -986,3 +1001,271 @@ def handle_auto_card_alert(text, ts, client, user_id=None):
             )
         except Exception:
             logger.error("Could not DM about Auto Card failure")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7. RCLIP (Reactive Credit Limit Increase)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def handle_rclip_alert(text, ts, client, user_id=None):
+    """Parse a reactive CLIP alert and create a Gmail draft.
+
+    Only drafts when Status=Approved and (New Limit - Old Limit) > $50,000.
+
+    Actual alert format (Slack mrkdwn):
+        Reactive Clip requested
+        > *Business Name:* CONCRETE ENGINE INC
+        > *Requested by:* email (Name)
+        > *Status:* Approved
+        > *New Limit Amount:* $10,000.00
+        > *Old Limit Amount:* $3,250.00
+        > *Salesforce Account:* <SF link>
+        > *Account Manager:* <@U...|Name>
+    """
+    try:
+        # ── Strip Slack bold markers ───────────────────────────────────────
+        clean = re.sub(r'\*([A-Za-z /]+(?:\(s\))?):?\*', r'\1:', text)
+
+        company_name = _extract_field(
+            r'Business Name:\s*(.+)', clean, "Unknown Company"
+        )
+
+        # Status — only draft for Approved
+        status = _extract_field(r'Status:\s*(.+)', clean, "").strip()
+        if "approved" not in status.lower():
+            logger.info(
+                "RCLIP alert (ts=%s): status=%s not Approved, skipping", ts, status
+            )
+            return
+
+        # Limits
+        old_limit_raw = _extract_field(
+            r'Old Limit(?:\s*Amount)?:\s*\$?([\d,]+)', clean, "0"
+        )
+        new_limit_raw = _extract_field(
+            r'New Limit(?:\s*Amount)?:\s*\$?([\d,]+)', clean, "0"
+        )
+        old_limit = int(old_limit_raw.replace(",", ""))
+        new_limit = int(new_limit_raw.replace(",", ""))
+        limit_increase = new_limit - old_limit
+
+        # ── Threshold filter: delta > $50k ────────────────────────────────
+        if limit_increase < 50_000:
+            logger.info(
+                "RCLIP alert (ts=%s): increase $%s < $50k threshold, skipping",
+                ts, f"{limit_increase:,}",
+            )
+            return
+
+        # Requested by — format: "email (Name)" or "<mailto:email|email> (Name)"
+        requested_by_raw = _extract_field(r'Requested by:\s*(.+)', clean, "")
+        req_email = ""
+        req_name = ""
+        if requested_by_raw:
+            req_email = _strip_slack_email(requested_by_raw.split("(")[0].strip())
+            name_match = re.search(r'\(([^)]+)\)', requested_by_raw)
+            if name_match:
+                req_name = name_match.group(1).strip()
+
+        if not req_email:
+            logger.warning(
+                "RCLIP alert (ts=%s): no email found, skipping", ts
+            )
+            return
+
+        first_name = req_name.split()[0] if req_name else "there"
+
+        # ── Build email ───────────────────────────────────────────────────
+        html_body = rclip_email(first_name=first_name, user_id=user_id)
+
+        subject = "Ramp Limit Increase + AM intro"
+        draft_id = f"rclip_{ts}"
+        draft_method, _ = _create_or_queue_draft(
+            draft_id=draft_id, to=req_email, subject=subject,
+            html_body=html_body, account_name=company_name,
+            label="Claude Drafts/RCLIP", user_id=user_id,
+        )
+
+        # ── DM user ───────────────────────────────────────────────────────
+        old_fmt = _format_dollars(old_limit)
+        new_fmt = _format_dollars(new_limit)
+        details = (
+            f"*To:* {req_email} ({req_name})\n"
+            f"*Subject:* {subject}\n"
+            f"*Company:* {company_name}\n"
+            f"*Old Limit:* {old_fmt}  |  *New Limit:* {new_fmt}\n"
+            f"*Increase:* {_format_dollars(limit_increase)}"
+        )
+
+        blocks = drafter_confirmation_blocks(
+            drafter_type="RCLIP",
+            account_name=company_name,
+            details=details,
+            draft_id=draft_id,
+        )
+        _dm_greg(client, blocks, user_id=user_id)
+
+        logger.info(
+            "RCLIP draft created — company=%s increase=%s to=%s draft=%s",
+            company_name, _format_dollars(limit_increase), req_email, draft_id,
+        )
+
+    except Exception as e:
+        logger.exception("Error handling RCLIP alert (ts=%s): %s", ts, e)
+        try:
+            _dm_greg(
+                client,
+                drafter_confirmation_blocks(
+                    drafter_type="RCLIP",
+                    account_name="ERROR",
+                    details=f"Failed to create draft:\n```{e}```",
+                ),
+                user_id=user_id,
+            )
+        except Exception:
+            logger.error("Could not DM about RCLIP failure")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. AM Escalation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _clean_escalation_context(ticket_desc: str, escalation_reason: str) -> str:
+    """Build a natural context phrase from the ticket description and escalation reason.
+
+    Returns a phrase suitable for: 'our support team let me know {context}'.
+    """
+    # Prefer escalation reason (shorter, more specific)
+    raw = escalation_reason.strip() if escalation_reason.strip() else ticket_desc.strip()
+    if not raw:
+        return "you were looking for some help"
+
+    raw = raw.rstrip(".")
+    lower = raw.lower()
+
+    # Strip common prefixes to make it read naturally
+    for prefix in [
+        "customer wants ", "customer needs ", "customer is looking for ",
+        "customer would like ", "customer is asking ", "customer asked ",
+        "they want ", "they need ", "user wants ", "user needs ",
+        "customer needs help with ", "customer wants help with ",
+    ]:
+        if lower.startswith(prefix):
+            remainder = raw[len(prefix):]
+            # Avoid "some help with help with X"
+            if remainder.lower().startswith("help with "):
+                return f"you were looking for some {remainder}"
+            return f"you were looking for some help with {remainder}"
+
+    # If the text is a first-person request from the customer (ticket desc)
+    if lower.startswith("hello") or lower.startswith("hi") or lower.startswith("i "):
+        return "you were looking for some help"
+
+    return f"you were looking for some help with {raw}"
+
+
+def handle_am_escalation_alert(text, ts, client, user_id=None):
+    """Parse a CX-to-AM escalation alert and create a contextual Gmail draft.
+
+    Actual alert format:
+        CX to Post Sales Submission from @agent
+        Account Manager / CSM: <@U06DAFU4YRG>
+        Business ID: 950745
+        Business Name: Divvy Holdings NC LLC
+        User Email: willd@blueplanetplumbing.com
+        Salesforce Account Link: https://...
+        Zendesk Ticket Link: https://...
+        Ticket description: Hello, I would like to...
+        Escalation reason: customer wants Bill Pay turned on
+    """
+    try:
+        # ── Strip Slack bold markers for easier parsing ────────────────────
+        clean = re.sub(r'\*([A-Za-z /]+(?:\(s\))?):?\*', r'\1:', text)
+
+        # ── Extract fields ────────────────────────────────────────────────
+        company_name = _extract_field(
+            r'Business Name:\s*(.+)', clean, "Unknown Company"
+        )
+        user_email_raw = _extract_field(r'User Email:\s*(.+)', clean, "")
+        user_email = _strip_slack_email(user_email_raw) if user_email_raw else ""
+
+        ticket_desc = _extract_field(r'Ticket description:\s*(.+)', clean, "")
+        escalation_reason = _extract_field(r'Escalation reason:\s*(.+)', clean, "")
+
+        zendesk_link = ""
+        zd_raw = _extract_field(r'Zendesk Ticket Link:\s*(.+)', clean, "")
+        if zd_raw:
+            zendesk_link = _strip_slack_url(zd_raw)
+
+        sf_link = ""
+        sf_raw = _extract_field(r'Salesforce Account Link:\s*(.+)', clean, "")
+        if sf_raw:
+            sf_link = _strip_slack_url(sf_raw)
+
+        if not user_email:
+            logger.warning(
+                "AM Escalation alert (ts=%s): no user email, skipping", ts
+            )
+            return
+
+        # Try to get first name from the email local part
+        local = user_email.split("@")[0]
+        first_name = local.split(".")[0].capitalize() if "." in local else "there"
+
+        # ── Build email ───────────────────────────────────────────────────
+        context = _clean_escalation_context(ticket_desc, escalation_reason)
+        html_body = am_escalation_email(
+            first_name=first_name,
+            escalation_context=context,
+            user_id=user_id,
+        )
+
+        subject = "Ramp AM Intro"
+        draft_id = f"escalation_{ts}"
+        draft_method, _ = _create_or_queue_draft(
+            draft_id=draft_id, to=user_email, subject=subject,
+            html_body=html_body, account_name=company_name,
+            label="Claude Drafts/AM Escalation", user_id=user_id,
+        )
+
+        # ── DM user ───────────────────────────────────────────────────────
+        details = (
+            f"*To:* {user_email}\n"
+            f"*Subject:* {subject}\n"
+            f"*Company:* {company_name}\n"
+            f"*Escalation:* {escalation_reason or ticket_desc or 'N/A'}"
+        )
+        if zendesk_link:
+            details += f"\n<{zendesk_link}|Zendesk Ticket>"
+        if sf_link:
+            details += f"  |  <{sf_link}|Salesforce>"
+
+        blocks = drafter_confirmation_blocks(
+            drafter_type="AM Escalation",
+            account_name=company_name,
+            details=details,
+            draft_id=draft_id,
+        )
+        _dm_greg(client, blocks, user_id=user_id)
+
+        logger.info(
+            "AM Escalation draft created (%s) — company=%s to=%s draft=%s",
+            draft_method, company_name, user_email, draft_id,
+        )
+
+    except Exception as e:
+        logger.exception("Error handling AM Escalation alert (ts=%s): %s", ts, e)
+        try:
+            _dm_greg(
+                client,
+                drafter_confirmation_blocks(
+                    drafter_type="AM Escalation",
+                    account_name="ERROR",
+                    details=f"Failed to create draft:\n```{e}```",
+                ),
+                user_id=user_id,
+            )
+        except Exception:
+            logger.error("Could not DM about AM Escalation failure")
