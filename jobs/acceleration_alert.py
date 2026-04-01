@@ -16,7 +16,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from config import GREG_SLACK_ID
+from config import GREG_SLACK_ID, COMMAND_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +382,7 @@ def _send_realtime_alerts(client, rows, now, dm_target=None):
 
             overflow = len(group_rows) - MAX_PER_TYPE
             if overflow > 0:
-                lines.append(f"_...and {overflow} more — use `/priorities` to see all_")
+                lines.append(f"_...and {overflow} more — use `/{COMMAND_PREFIX}-priorities` to see all_")
 
             blocks = [
                 {

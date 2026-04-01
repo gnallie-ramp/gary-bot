@@ -16,7 +16,7 @@ from queries.queries import FORECASTING_PIPELINE_QUERY, format_query
 from core.snowflake_client import run_query
 from core.claude_client import call_claude_json
 from core.slack_formatter import sf_opp_url, format_currency, simple_dm_blocks, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -345,7 +345,7 @@ def _build_blocks(
     _pipe = dashboard_url("pipeline")
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"<{_perf}|Performance> · <{_pipe}|Pipeline> · `/forecast` to refresh"}],
+        "elements": [{"type": "mrkdwn", "text": f"<{_perf}|Performance> · <{_pipe}|Pipeline> · `/{COMMAND_PREFIX}-forecast` to refresh"}],
     })
 
     return blocks

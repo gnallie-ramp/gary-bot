@@ -18,7 +18,7 @@ import pandas as pd
 
 from core.snowflake_client import run_query
 from core.slack_formatter import format_currency, sf_opp_url, sf_account_url, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 from queries.queries import REALIZED_CP_QUERY, format_query
 
 logger = logging.getLogger(__name__)
@@ -174,7 +174,7 @@ def run_post_close_monitor(client, user_id=None, force: bool = False):
                 "type": "mrkdwn",
                 "text": (
                     "Baseline = L30D spend at close-won date. CP = (spend - baseline) x NTR per 30-day window.\n"
-                    f"<{_perf}|Performance> · <{_pipe}|Pipeline> · `/post-close` to refresh"
+                    f"<{_perf}|Performance> · <{_pipe}|Pipeline> · `/{COMMAND_PREFIX}-post-close` to refresh"
                 ),
             }],
         })

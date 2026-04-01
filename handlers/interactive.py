@@ -16,7 +16,7 @@ import time
 # Limit concurrent draft threads to prevent Snowflake connection overload
 _draft_semaphore = threading.Semaphore(3)
 
-from config import GREG_SLACK_ID
+from config import GREG_SLACK_ID, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name, get_user_first_name, get_user_booking_link
 
 logger = logging.getLogger(__name__)
@@ -814,7 +814,7 @@ def register_interactive_handlers(app):
         if not account_id:
             client.chat_postMessage(
                 channel=user_id,
-                text="Could not identify the account — try `/gary-brief` instead.",
+                text=f"Could not identify the account — try `/{COMMAND_PREFIX}-brief` instead.",
             )
             return
 
@@ -880,7 +880,7 @@ def register_interactive_handlers(app):
         if not account_id:
             client.chat_postMessage(
                 channel=user_id,
-                text="Could not identify the account — try `/gary-brief` instead.",
+                text=f"Could not identify the account — try `/{COMMAND_PREFIX}-brief` instead.",
             )
             return
 

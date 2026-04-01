@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import datetime
 
-from config import GREG_SLACK_ID, NTR_RATES, DEDUP_STATE_FILE, TIMEZONE
+from config import GREG_SLACK_ID, NTR_RATES, DEDUP_STATE_FILE, TIMEZONE, COMMAND_PREFIX
 from core.slack_formatter import simple_dm_blocks, format_currency, dashboard_url
 from utils.dedup import tracker
 
@@ -99,26 +99,26 @@ def run_status(client, user_id=None, force: bool = False):
         lines.append(f"  \u2022 {name} — {schedule}")
 
     lines.append("\n*On-Demand Commands:*")
-    lines.append("  `/priorities` — *ranked priority actions (start here)*")
-    lines.append("  `/nudge` — what's new + highest-value suggestions")
-    lines.append("  `/spend-pacing` — MTD vs last month, YoY, trajectory")
-    lines.append("  `/activity-report` — SQLs created + opps closed by product")
-    lines.append("  `/top-accounts` — Top 50 accounts ranked by CP potential")
-    lines.append("  `/batch-outreach` — cluster accounts + draft campaigns")
-    lines.append("  `/zero-to-one` — check activations now")
-    lines.append("  `/opp-pacing` — pacing report now")
-    lines.append("  `/pipeline-cleanup` — cleanup analysis")
-    lines.append("  `/post-meeting [days]` — post-meeting check")
-    lines.append("  `/post-close` — post-close CP + activation tracking")
-    lines.append("  `/quota-heartbeat` — CP attainment + accelerator band")
-    lines.append("  `/forecast` — weekly forecast")
-    lines.append("  `/morning-brief` — combined daily action summary")
-    lines.append("  `/gary-lookup <name>` — account snapshot")
-    lines.append("  `/gary-brief <name>` — pre-call brief")
-    lines.append("  `/gary-opps` — open opp summary")
-    lines.append("  `/gary-status` — this health check")
-    lines.append("  `/gary-help` — full command reference")
-    lines.append("  `/gary-test` — run all jobs in test mode")
+    lines.append(f"  `/{COMMAND_PREFIX}-priorities` — *ranked priority actions (start here)*")
+    lines.append(f"  `/{COMMAND_PREFIX}-nudge` — what's new + highest-value suggestions")
+    lines.append(f"  `/{COMMAND_PREFIX}-spend-pacing` — MTD vs last month, YoY, trajectory")
+    lines.append(f"  `/{COMMAND_PREFIX}-activity-report` — SQLs created + opps closed by product")
+    lines.append(f"  `/{COMMAND_PREFIX}-top-accounts` — Top 50 accounts ranked by CP potential")
+    lines.append(f"  `/{COMMAND_PREFIX}-batch-outreach` — cluster accounts + draft campaigns")
+    lines.append(f"  `/{COMMAND_PREFIX}-zero-to-one` — check activations now")
+    lines.append(f"  `/{COMMAND_PREFIX}-opp-pacing` — pacing report now")
+    lines.append(f"  `/{COMMAND_PREFIX}-pipeline-cleanup` — cleanup analysis")
+    lines.append(f"  `/{COMMAND_PREFIX}-post-meeting [days]` — post-meeting check")
+    lines.append(f"  `/{COMMAND_PREFIX}-post-close` — post-close CP + activation tracking")
+    lines.append(f"  `/{COMMAND_PREFIX}-quota-heartbeat` — CP attainment + accelerator band")
+    lines.append(f"  `/{COMMAND_PREFIX}-forecast` — weekly forecast")
+    lines.append(f"  `/{COMMAND_PREFIX}-morning-brief` — combined daily action summary")
+    lines.append(f"  `/{COMMAND_PREFIX}-lookup <name>` — account snapshot")
+    lines.append(f"  `/{COMMAND_PREFIX}-brief <name>` — pre-call brief")
+    lines.append(f"  `/{COMMAND_PREFIX}-opps` — open opp summary")
+    lines.append(f"  `/{COMMAND_PREFIX}-status` — this health check")
+    lines.append(f"  `/{COMMAND_PREFIX}-help` — full command reference")
+    lines.append(f"  `/{COMMAND_PREFIX}-test` — run all jobs in test mode")
     lines.append("\n*DM me naturally:*")
     lines.append('  "what\'s new" / "priorities" / "spend pacing" / "look up Acme Corp"')
 
@@ -141,37 +141,37 @@ def run_help(client, user_id=None):
     lines = [
         "*Everything I can do:*\n",
         "*\U0001f50d Account Intelligence*",
-        "  `/gary-lookup <name>` — Products, L30D spend, contacts",
-        "  `/gary-brief <name>` — AI pre-call brief (15-30 sec)",
-        "  `/gary-opps` — All open opps with CP estimates",
-        "  `/top-accounts` — Top 50 accounts ranked by CP potential",
+        f"  `/{COMMAND_PREFIX}-lookup <name>` — Products, L30D spend, contacts",
+        f"  `/{COMMAND_PREFIX}-brief <name>` — AI pre-call brief (15-30 sec)",
+        f"  `/{COMMAND_PREFIX}-opps` — All open opps with CP estimates",
+        f"  `/{COMMAND_PREFIX}-top-accounts` — Top 50 accounts ranked by CP potential",
         '  DM: "look up Acme Corp" / "tell me about Beta LLC"\n',
         "*\U0001f3af Priority Actions + Nudges*",
-        "  `/priorities` — *Combined ranked list of everything* (start here)",
-        "  `/nudge` — What's new since last check + top suggestions",
-        "  `/batch-outreach` — Cluster similar accounts + draft batch campaigns",
+        f"  `/{COMMAND_PREFIX}-priorities` — *Combined ranked list of everything* (start here)",
+        f"  `/{COMMAND_PREFIX}-nudge` — What's new since last check + top suggestions",
+        f"  `/{COMMAND_PREFIX}-batch-outreach` — Cluster similar accounts + draft batch campaigns",
         "  DM: \"what should I focus on?\" / \"what's new\" / \"suggestions\"\n",
         "*\U0001f4c8 Pacing + Performance*",
-        "  `/spend-pacing` — MTD vs last month, YoY, L7D trajectory",
-        "  `/opp-pacing` — Open opps pacing vs baseline",
-        "  `/quota-heartbeat` — CP attainment + accelerator band",
-        "  `/activity-report` — SQLs created + opps closed by product",
-        "  `/forecast` — Weekly pipeline forecast\n",
+        f"  `/{COMMAND_PREFIX}-spend-pacing` — MTD vs last month, YoY, L7D trajectory",
+        f"  `/{COMMAND_PREFIX}-opp-pacing` — Open opps pacing vs baseline",
+        f"  `/{COMMAND_PREFIX}-quota-heartbeat` — CP attainment + accelerator band",
+        f"  `/{COMMAND_PREFIX}-activity-report` — SQLs created + opps closed by product",
+        f"  `/{COMMAND_PREFIX}-forecast` — Weekly pipeline forecast\n",
         "*\u26a1 Pipeline + Signals*",
-        "  `/zero-to-one` — New product activations",
-        "  `/pipeline-cleanup` — Stale/miscategorized opps",
-        "  `/post-meeting [days]` — Gong calls missing follow-up/opp",
-        "  `/post-close` — Post-close CP + activation tracking",
-        "  `/morning-brief` — Combined daily action summary\n",
+        f"  `/{COMMAND_PREFIX}-zero-to-one` — New product activations",
+        f"  `/{COMMAND_PREFIX}-pipeline-cleanup` — Stale/miscategorized opps",
+        f"  `/{COMMAND_PREFIX}-post-meeting [days]` — Gong calls missing follow-up/opp",
+        f"  `/{COMMAND_PREFIX}-post-close` — Post-close CP + activation tracking",
+        f"  `/{COMMAND_PREFIX}-morning-brief` — Combined daily action summary\n",
         "*\u26a1 Scheduled Alerts*",
         "  \u2022 Pipeline Cleanup (7:30AM) · Morning Brief (7:45AM) · Opp Pacing (8AM)",
         "  \u2022 Activity Report (8:30AM) · Spend Pacing (9AM) · Post-Close (10AM)",
         "  \u2022 Proactive Nudge (10:30/12:30/2:30/4:30PM) · Post-Meeting (every 2h)",
         "  \u2022 Zero-to-One (every 4h) · Quota Heartbeat (6PM) · Forecast (Mon 7AM)\n",
         "*\U0001f6e0\ufe0f Utilities*",
-        "  `/gary-status` — Health check + connection status",
-        "  `/gary-help` — This message",
-        "  `/gary-test` — Test all connections + run all jobs\n",
+        f"  `/{COMMAND_PREFIX}-status` — Health check + connection status",
+        f"  `/{COMMAND_PREFIX}-help` — This message",
+        f"  `/{COMMAND_PREFIX}-test` — Test all connections + run all jobs\n",
         "*\U0001f4ac DM me anything*",
         '  I understand natural language. Try "what should I focus on today?", '
         '"what\'s new", "spend pacing", or "look up Acme Corp"\n',

@@ -28,7 +28,7 @@ from core.claude_client import call_claude_json
 from core.slack_formatter import sf_account_url, sf_opp_url, simple_dm_blocks, dashboard_url
 from utils.dedup import tracker
 from utils.account_resolver import is_hash_like
-from config import GREG_SLACK_ID
+from config import GREG_SLACK_ID, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -586,7 +586,7 @@ def _build_slack_blocks(items):
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"<{_pm}|Post-Meeting To-Do> · <{_pipe}|Pipeline> · `/post-meeting` to refresh"}],
+        "elements": [{"type": "mrkdwn", "text": f"<{_pm}|Post-Meeting To-Do> · <{_pipe}|Pipeline> · `/{COMMAND_PREFIX}-post-meeting` to refresh"}],
     })
 
     return blocks

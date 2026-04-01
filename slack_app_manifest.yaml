@@ -1,3 +1,6 @@
+# Slash commands use the COMMAND_PREFIX from .env (default: "gary").
+# Before pasting this manifest into api.slack.com, find-and-replace "gary"
+# with your chosen prefix (e.g. "jane") in the command names below.
 display_information:
   name: Gary Bot
   description: AI Sales Intelligence Co-Pilot for Growth AMs
@@ -22,19 +25,19 @@ features:
       description: Pre-call expansion brief
       usage_hint: "[account name]"
       should_escape: false
-    - command: /pipeline-cleanup
+    - command: /gary-pipeline-cleanup
       description: Urgency-ranked pipeline review
       should_escape: false
-    - command: /post-meeting
+    - command: /gary-post-meeting
       description: Post-meeting to-do check
       should_escape: false
-    - command: /opp-pacing
+    - command: /gary-opp-pacing
       description: Opp milestone tracking
       should_escape: false
-    - command: /zero-to-one
+    - command: /gary-zero-to-one
       description: Fresh product activations
       should_escape: false
-    - command: /forecast
+    - command: /gary-forecast
       description: S3+ opps + coaching brief
       should_escape: false
     - command: /gary-status
@@ -46,37 +49,37 @@ features:
     - command: /gary-test
       description: Test all integrations
       should_escape: false
-    - command: /morning-brief
+    - command: /gary-morning-brief
       description: Daily action summary
       should_escape: false
-    - command: /priorities
+    - command: /gary-priorities
       description: Ranked priority actions
       should_escape: false
-    - command: /quota-heartbeat
+    - command: /gary-quota-heartbeat
       description: CP attainment + accelerator band
       should_escape: false
-    - command: /spend-pacing
+    - command: /gary-spend-pacing
       description: MTD vs last month trajectory
       should_escape: false
-    - command: /post-close
+    - command: /gary-post-close
       description: Post-close activation tracking
       should_escape: false
-    - command: /activity-report
+    - command: /gary-activity-report
       description: SQLs + opps closed by product
       should_escape: false
-    - command: /top-accounts
+    - command: /gary-top-accounts
       description: Top 50 by CP potential
       should_escape: false
-    - command: /batch-outreach
+    - command: /gary-batch-outreach
       description: Cluster accounts + draft campaigns
       should_escape: false
-    - command: /nudge
+    - command: /gary-nudge
       description: What's new since last check
       should_escape: false
-    - command: /bill-drafter
+    - command: /gary-bill-drafter
       description: Bill pay email drafter sweep
       should_escape: false
-    - command: /opp
+    - command: /gary-opp
       description: Quick-create pre-filled SF opp
       usage_hint: "[account] [product] [amount]"
       should_escape: false

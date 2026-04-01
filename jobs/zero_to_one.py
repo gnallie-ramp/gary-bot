@@ -17,7 +17,7 @@ import pandas as pd
 from queries.queries import SIGNALS_QUERY, format_query
 from core.snowflake_client import run_query
 from core.slack_formatter import sf_account_url, format_currency, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES, SF_BASE_URL
+from config import GREG_SLACK_ID, NTR_RATES, SF_BASE_URL, COMMAND_PREFIX
 from utils.dedup import tracker
 
 logger = logging.getLogger(__name__)
@@ -234,7 +234,7 @@ def _build_blocks(date_str: str, with_opp: list[dict], missing_opp: list[dict]) 
             "text": (
                 f"<{_priority_link}|View in Priority Actions> · "
                 f"<{_pipeline_link}|View in Pipeline> · "
-                "`/zero-to-one` to refresh"
+                f"`/{COMMAND_PREFIX}-zero-to-one` to refresh"
             ),
         }],
     })

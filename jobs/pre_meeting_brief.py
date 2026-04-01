@@ -32,7 +32,7 @@ from queries.queries import (
 )
 from utils.account_resolver import fetch_contact_emails
 from utils.dedup import tracker
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -435,7 +435,7 @@ Be direct and specific. Every point should tie to comp impact. This is a 2-minut
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"<{prep_link}|Full Meeting Prep> · `/gary-brief {account_name}` for expanded brief",
+                "text": f"<{prep_link}|Full Meeting Prep> · `/{COMMAND_PREFIX}-brief {account_name}` for expanded brief",
             }],
         })
 
@@ -469,6 +469,6 @@ def _send_unmatched_alert(meeting, client, dm_target=None):
         text=(
             f"\U0001f4c5 Meeting in {minutes_until} min: *{meeting['title']}* ({time_str})\n"
             f"Attendees: {attendee_str}\n"
-            f"_Couldn't match to an SFDC account — `/gary-brief <name>` to manually prep._"
+            f"_Couldn't match to an SFDC account — `/{COMMAND_PREFIX}-brief <name>` to manually prep._"
         ),
     )

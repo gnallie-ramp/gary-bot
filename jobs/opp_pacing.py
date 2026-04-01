@@ -14,7 +14,7 @@ import pandas as pd
 from queries.queries import OPP_PACING_MILESTONES_QUERY, format_query
 from core.snowflake_client import run_query
 from core.slack_formatter import sf_opp_url, format_currency, dashboard_url
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ def _build_blocks(
     _perf = dashboard_url("performance")
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"<{_pipe}|Pipeline> · <{_perf}|Performance> · `/opp-pacing` to refresh"}],
+        "elements": [{"type": "mrkdwn", "text": f"<{_pipe}|Pipeline> · <{_perf}|Performance> · `/{COMMAND_PREFIX}-opp-pacing` to refresh"}],
     })
 
     return blocks

@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime
 
-from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME
+from config import GREG_SLACK_ID, SF_BASE_URL, OWNER_NAME, COMMAND_PREFIX
 from core.user_registry import is_registered, register_user, get_user, get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -257,7 +257,7 @@ def _build_pipeline_tab(client, user_id):
     else:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "_No active priority signals right now. Check back later or run_ `/priorities`"},
+            "text": {"type": "mrkdwn", "text": f"_No active priority signals right now. Check back later or run_ `/{COMMAND_PREFIX}-priorities`"},
         })
 
     # Non-spend signals (stale, reopen, post-meeting, underperforming)
@@ -808,7 +808,7 @@ def _build_instructions_tab(client, user_id):
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "• *DM Gary* — Ask questions, run commands, or look up accounts. Just type naturally.",
-            "• *Slash commands* — Use `/priorities`, `/gary-lookup`, etc. from any channel.",
+            f"• *Slash commands* — Use `/{COMMAND_PREFIX}-priorities`, `/{COMMAND_PREFIX}-lookup`, etc. from any channel.",
             "• *Home tab* — This screen. Use the tabs above to navigate.",
             "• *Buttons* — Click Draft, Brief, View All, etc. throughout the app.",
             "• *Group DM* — @mention Gary in a group chat and he'll respond in character.",
@@ -887,52 +887,52 @@ def _build_instructions_tab(client, user_id):
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "*Daily Intelligence*",
-            "`/priorities` — Ranked actions across 7 signal categories",
-            "`/morning-brief` — Combined daily action summary",
-            "`/quota-heartbeat` — CP attainment + accelerator band",
-            "`/spend-pacing` — MTD vs last month + YoY trajectory",
-            "`/nudge` — What's new since last check",
+            f"`/{COMMAND_PREFIX}-priorities` — Ranked actions across 7 signal categories",
+            f"`/{COMMAND_PREFIX}-morning-brief` — Combined daily action summary",
+            f"`/{COMMAND_PREFIX}-quota-heartbeat` — CP attainment + accelerator band",
+            f"`/{COMMAND_PREFIX}-spend-pacing` — MTD vs last month + YoY trajectory",
+            f"`/{COMMAND_PREFIX}-nudge` — What's new since last check",
         ])},
     })
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "*Pipeline & Opps*",
-            "`/opp <account> <product> <amount>` — Quick-create pre-filled SF opp",
-            "`/gary-opps` — Open expansion opp summary",
-            "`/opp-pacing` — Opp milestone tracking",
-            "`/pipeline-cleanup` — Urgency-ranked pipeline + coaching",
-            "`/forecast` — S3+ opps + coaching brief",
+            f"`/{COMMAND_PREFIX}-opp <account> <product> <amount>` — Quick-create pre-filled SF opp",
+            f"`/{COMMAND_PREFIX}-opps` — Open expansion opp summary",
+            f"`/{COMMAND_PREFIX}-opp-pacing` — Opp milestone tracking",
+            f"`/{COMMAND_PREFIX}-pipeline-cleanup` — Urgency-ranked pipeline + coaching",
+            f"`/{COMMAND_PREFIX}-forecast` — S3+ opps + coaching brief",
         ])},
     })
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "*Account Intelligence*",
-            "`/gary-lookup <account>` — Account snapshot",
-            "`/gary-brief <account>` — Pre-call expansion brief",
-            "`/top-accounts` — Top 50 by CP potential",
-            "`/zero-to-one` — Fresh product activations",
-            "`/post-close` — Post-close activation tracking",
+            f"`/{COMMAND_PREFIX}-lookup <account>` — Account snapshot",
+            f"`/{COMMAND_PREFIX}-brief <account>` — Pre-call expansion brief",
+            f"`/{COMMAND_PREFIX}-top-accounts` — Top 50 by CP potential",
+            f"`/{COMMAND_PREFIX}-zero-to-one` — Fresh product activations",
+            f"`/{COMMAND_PREFIX}-post-close` — Post-close activation tracking",
         ])},
     })
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "*Outreach & Follow-Up*",
-            "`/post-meeting` — Post-meeting to-do check",
-            "`/batch-outreach` — Cluster accounts + draft campaigns",
-            "`/bill-drafter` — Bill pay email drafter sweep",
-            "`/activity-report` — SQLs + opps closed by product",
+            f"`/{COMMAND_PREFIX}-post-meeting` — Post-meeting to-do check",
+            f"`/{COMMAND_PREFIX}-batch-outreach` — Cluster accounts + draft campaigns",
+            f"`/{COMMAND_PREFIX}-bill-drafter` — Bill pay email drafter sweep",
+            f"`/{COMMAND_PREFIX}-activity-report` — SQLs + opps closed by product",
         ])},
     })
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "\n".join([
             "*System*",
-            "`/gary-status` — Health check",
-            "`/gary-help` — Full help",
-            "`/gary-test` — Test all integrations",
+            f"`/{COMMAND_PREFIX}-status` — Health check",
+            f"`/{COMMAND_PREFIX}-help` — Full help",
+            f"`/{COMMAND_PREFIX}-test` — Test all integrations",
         ])},
     })
     blocks.append({"type": "divider"})
@@ -1620,7 +1620,7 @@ def _get_non_spend_signals(user_id: str = None):
             if len(items) > 3:
                 blocks.append({
                     "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"_...and {len(items) - 3} more — use `/priorities` for full list_"}],
+                    "elements": [{"type": "mrkdwn", "text": f"_...and {len(items) - 3} more — use `/{COMMAND_PREFIX}-priorities` for full list_"}],
                 })
 
         if not has_content:

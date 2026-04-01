@@ -15,6 +15,9 @@ OWNER_SLACK_ID = os.getenv("OWNER_SLACK_ID", "U06DAFU4YRG")
 # Booking link for email CTAs
 BOOKING_LINK = os.getenv("BOOKING_LINK", "https://ramp-com.chilipiper.com/me/gregory-nallie/ramp")
 
+# Slash command prefix — each instance gets unique commands (e.g. /gary-lookup, /jane-lookup)
+COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "gary")
+
 # Backward-compat alias — existing code imports this everywhere
 GREG_SLACK_ID = OWNER_SLACK_ID
 

@@ -13,13 +13,19 @@ from core.email_context import get_email_context, format_email_context_line, for
 from queries.queries import ACCOUNT_LOOKUP_QUERY, ACCOUNT_OPPS_QUERY, GONG_MEETINGS_QUERY, format_query
 from core.user_registry import is_registered, get_user
 from utils.account_resolver import fetch_contact_emails
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 
 logger = logging.getLogger(__name__)
 
 
 def register_slash_commands(app):
     """Register all slash commands with the Bolt app."""
+
+    pfx = COMMAND_PREFIX
+
+    def cmd(name):
+        """Build prefixed command name, e.g. cmd('lookup') -> '/gary-lookup'."""
+        return f"/{pfx}-{name}"
 
     def _check_user(command, respond=None):
         uid = command.get("user_id", "")
@@ -29,7 +35,7 @@ def register_slash_commands(app):
             return None
         return get_user(uid)
 
-    @app.command("/gary-lookup")
+    @app.command(cmd("lookup"))
     def handle_gary_lookup(ack, command, client, respond):
         """Account snapshot: products, spend, opps, contacts."""
         ack()
@@ -38,7 +44,7 @@ def register_slash_commands(app):
             return
         search_term = command.get("text", "").strip()
         if not search_term:
-            respond("Usage: `/gary-lookup <account name>`")
+            respond(f"Usage: `{cmd('lookup')} <account name>`")
             return
 
         try:
@@ -123,7 +129,7 @@ def register_slash_commands(app):
             logger.error("gary-lookup failed: %s", e)
             respond(f"Error looking up *{search_term}*: {e}")
 
-    @app.command("/gary-opps")
+    @app.command(cmd("opps"))
     def handle_gary_opps(ack, command, client, respond):
         """Open opp summary with CP values."""
         ack()
@@ -187,7 +193,7 @@ def register_slash_commands(app):
             logger.error("gary-opps failed: %s", e)
             respond(f"Error loading opps: {e}")
 
-    @app.command("/gary-brief")
+    @app.command(cmd("brief"))
     def handle_gary_brief(ack, command, client, respond):
         """Pre-call brief for an account."""
         ack()
@@ -196,7 +202,7 @@ def register_slash_commands(app):
             return
         search_term = command.get("text", "").strip()
         if not search_term:
-            respond("Usage: `/gary-brief <account name>`")
+            respond(f"Usage: `{cmd('brief')} <account name>`")
             return
 
         try:
@@ -339,7 +345,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
     # ── Intelligence job slash commands ─────────────────────────────────
 
-    @app.command("/pipeline-cleanup")
+    @app.command(cmd("pipeline-cleanup"))
     def handle_pipeline_cleanup(ack, command, client, respond):
         """On-demand pipeline cleanup analysis."""
         ack()
@@ -361,15 +367,15 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/post-meeting")
+    @app.command(cmd("post-meeting"))
     def handle_post_meeting(ack, command, client, respond):
         """On-demand post-meeting check (Granola-first, Gong fallback).
 
         Usage:
-            /post-meeting              — check Granola for recent calls, fall back to Gong
-            /post-meeting 7            — all calls in last 7 days (Gong batch)
-            /post-meeting ondeck       — latest call for a specific account
-            /post-meeting ondeck 7     — latest call for account in last 7 days
+            /{pfx}-post-meeting              — check Granola for recent calls, fall back to Gong
+            /{pfx}-post-meeting 7            — all calls in last 7 days (Gong batch)
+            /{pfx}-post-meeting ondeck       — latest call for a specific account
+            /{pfx}-post-meeting ondeck 7     — latest call for account in last 7 days
         """
         ack()
         user = _check_user(command, respond)
@@ -416,7 +422,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/opp-pacing")
+    @app.command(cmd("opp-pacing"))
     def handle_opp_pacing(ack, command, client, respond):
         """On-demand opp pacing report. Accepts optional account name filter."""
         ack()
@@ -443,7 +449,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/zero-to-one")
+    @app.command(cmd("zero-to-one"))
     def handle_zero_to_one(ack, command, client, respond):
         """On-demand zero-to-one activation alert."""
         ack()
@@ -465,7 +471,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/forecast")
+    @app.command(cmd("forecast"))
     def handle_forecast(ack, command, client, respond):
         """On-demand weekly forecast refresh."""
         ack()
@@ -489,7 +495,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
     # ── Status, help, test, and morning brief commands ────────────────
 
-    @app.command("/gary-status")
+    @app.command(cmd("status"))
     def handle_gary_status(ack, command, client, respond):
         """Health check: connections, schedules, dedup state."""
         ack()
@@ -511,7 +517,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/gary-help")
+    @app.command(cmd("help"))
     def handle_gary_help(ack, command, client, respond):
         """Full capability listing with examples."""
         ack()
@@ -532,7 +538,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/gary-test")
+    @app.command(cmd("test"))
     def handle_gary_test(ack, command, client, respond):
         """Run all jobs in test mode to verify everything works."""
         ack()
@@ -554,7 +560,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/morning-brief")
+    @app.command(cmd("morning-brief"))
     def handle_morning_brief(ack, command, client, respond):
         """On-demand morning brief — combined daily action summary."""
         ack()
@@ -576,7 +582,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/priorities")
+    @app.command(cmd("priorities"))
     def handle_priorities(ack, command, client, respond):
         """Priority actions — the single ranked list of what to do now."""
         ack()
@@ -600,7 +606,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
     # ── New job slash commands ─────────────────────────────────────────
 
-    @app.command("/quota-heartbeat")
+    @app.command(cmd("quota-heartbeat"))
     def handle_quota_heartbeat(ack, command, client, respond):
         """On-demand quota heartbeat — CP attainment + accelerator band."""
         ack()
@@ -622,7 +628,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/spend-pacing")
+    @app.command(cmd("spend-pacing"))
     def handle_spend_pacing(ack, command, client, respond):
         """On-demand spend pacing — MTD vs last month, YoY, trajectory."""
         ack()
@@ -644,7 +650,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/post-close")
+    @app.command(cmd("post-close"))
     def handle_post_close(ack, command, client, respond):
         """On-demand post-close CP monitor — activation + baseline tracking."""
         ack()
@@ -666,7 +672,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/activity-report")
+    @app.command(cmd("activity-report"))
     def handle_activity_report(ack, command, client, respond):
         """On-demand activity report — SQLs created + opps closed by product."""
         ack()
@@ -688,7 +694,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/top-accounts")
+    @app.command(cmd("top-accounts"))
     def handle_top_accounts(ack, command, client, respond):
         """On-demand account tiering — Top 50 ranked by CP potential."""
         ack()
@@ -710,7 +716,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/batch-outreach")
+    @app.command(cmd("batch-outreach"))
     def handle_batch_outreach(ack, command, client, respond):
         """On-demand batch outreach — cluster accounts + draft campaigns."""
         ack()
@@ -732,7 +738,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/nudge")
+    @app.command(cmd("nudge"))
     def handle_nudge(ack, command, client, respond):
         """On-demand proactive nudge — what's new + highest-value suggestions."""
         ack()
@@ -754,7 +760,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/bill-drafter")
+    @app.command(cmd("bill-drafter"))
     def handle_bill_drafter(ack, command, client, respond):
         """On-demand bill drafter sweep. Accepts optional lookback: 2h (default), 24h, 7d."""
         ack()
@@ -770,16 +776,16 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
                 try:
                     lookback_hours = float(text[:-1])
                 except ValueError:
-                    respond(f"Usage: `/bill-drafter [2h|24h|7d]`. Got: `{text}`")
+                    respond(f"Usage: `/{pfx}-bill-drafter [2h|24h|7d]`. Got: `{text}`")
                     return
             elif text.endswith("d"):
                 try:
                     lookback_hours = float(text[:-1]) * 24
                 except ValueError:
-                    respond(f"Usage: `/bill-drafter [2h|24h|7d]`. Got: `{text}`")
+                    respond(f"Usage: `/{pfx}-bill-drafter [2h|24h|7d]`. Got: `{text}`")
                     return
             else:
-                respond(f"Usage: `/bill-drafter [2h|24h|7d]`. Got: `{text}`")
+                respond(f"Usage: `/{pfx}-bill-drafter [2h|24h|7d]`. Got: `{text}`")
                 return
 
         lookback_hours = max(0.5, min(lookback_hours, 168.0))  # 30 min to 7 days
@@ -808,7 +814,7 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
-    @app.command("/opp")
+    @app.command(cmd("opp"))
     def handle_opp(ack, command, client, respond):
         """Quick opp creation: /opp <account> <product> <amount> [| next step | notes]
 
@@ -825,8 +831,8 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
         text = command.get("text", "").strip()
         if not text:
             respond(
-                "Usage: `/opp <account> <product> <amount> [| next step | notes]`\n"
-                "Example: `/opp ondeck card 50k | send contract by Friday | consolidating AP`\n"
+                f"Usage: `/{pfx}-opp <account> <product> <amount> [| next step | notes]`\n"
+                f"Example: `/{pfx}-opp ondeck card 50k | send contract by Friday | consolidating AP`\n"
                 "Products: card, bill pay (bp), treasury, travel, saas, procurement"
             )
             return

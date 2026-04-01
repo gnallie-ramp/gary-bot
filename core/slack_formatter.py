@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import urllib.parse
 
-from config import SF_BASE_URL, DASHBOARD_BASE_URL
+from config import SF_BASE_URL, DASHBOARD_BASE_URL, COMMAND_PREFIX
 
 
 # ── URL Helpers ───────────────────────────────────────────────────────────────
@@ -388,7 +388,7 @@ def opp_pacing_blocks(close_today, pacing_exceed, zero_to_one):
             "text": (
                 f"*Dashboard:* <{_pipeline_url}|Pipeline> · "
                 f"<{_priority_url}|Priority Actions> · "
-                "`/opp-pacing` to refresh"
+                f"`/{COMMAND_PREFIX}-opp-pacing` to refresh"
             ),
         }],
     })

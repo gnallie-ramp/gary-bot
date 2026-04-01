@@ -16,7 +16,7 @@ from core.snowflake_client import run_query
 from core.slack_formatter import (
     sf_account_url, sf_opp_url, format_currency, dashboard_url,
 )
-from config import GREG_SLACK_ID, ALERT_CHANNELS, GMAIL_ADDRESS, NTR_RATES, OWNER_NAME
+from config import GREG_SLACK_ID, ALERT_CHANNELS, GMAIL_ADDRESS, NTR_RATES, OWNER_NAME, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -533,5 +533,5 @@ def _check_gong_calls(gap_hours, user_id=None):
 
     if len(unprocessed) > 5:
         lines.append(f"  _...and {len(unprocessed) - 5} more_")
-    lines.append("  `/post-meeting` to analyze \u2014 or wait for next scheduled run")
+    lines.append(f"  `/{COMMAND_PREFIX}-post-meeting` to analyze \u2014 or wait for next scheduled run")
     return "\n".join(lines)

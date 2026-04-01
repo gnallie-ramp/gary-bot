@@ -4,7 +4,7 @@ from core.snowflake_client import run_query
 from core.slack_formatter import quota_heartbeat_blocks, format_currency
 from queries.queries import REALIZED_CP_QUERY, format_query
 from utils.cp_calculator import compute_realized_cp
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def run_quota_heartbeat(client, user_id=None):
                     missed_text += f"\n  \u2022 {m.get('account', '')} — {m.get('product', '').replace(' Expansion', '')}"
                 if len(missed) > 3:
                     missed_text += f"\n  _...and {len(missed) - 3} more_"
-                missed_text += "\n`/priorities` \u2192 post-meeting opps to create them"
+                missed_text += f"\n`/{COMMAND_PREFIX}-priorities` \u2192 post-meeting opps to create them"
                 blocks.append({"type": "divider"})
                 blocks.append({
                     "type": "section",

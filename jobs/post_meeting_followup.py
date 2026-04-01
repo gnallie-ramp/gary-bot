@@ -31,7 +31,7 @@ from core.slack_formatter import (
 )
 from utils.dedup import tracker
 from utils.account_matcher import match_account
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name, get_user_booking_link
 
 logger = logging.getLogger(__name__)
@@ -769,7 +769,7 @@ def _send_followup_dm(results, client, dm_target=None):
         "type": "context",
         "elements": [{
             "type": "mrkdwn",
-            "text": f"<{_pm}|Post-Meeting To-Do> \u00b7 <{_pipe}|Pipeline> \u00b7 `/post-meeting` to refresh",
+            "text": f"<{_pm}|Post-Meeting To-Do> \u00b7 <{_pipe}|Pipeline> \u00b7 `/{COMMAND_PREFIX}-post-meeting` to refresh",
         }],
     })
 

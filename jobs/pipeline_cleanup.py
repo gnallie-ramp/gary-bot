@@ -21,7 +21,7 @@ from queries.queries import (
     format_query,
 )
 from utils.account_resolver import fetch_contact_emails, is_hash_like
-from config import GREG_SLACK_ID
+from config import GREG_SLACK_ID, COMMAND_PREFIX
 from core.user_registry import get_user_sf_name
 
 logger = logging.getLogger(__name__)
@@ -400,7 +400,7 @@ def _build_cleanup_blocks(ranked_results: list[dict]) -> list[dict]:
     _prosp = dashboard_url("prospecting")
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"<{_pipe}|Pipeline> · <{_prosp}|Prospecting> · `/pipeline-cleanup` to refresh"}],
+        "elements": [{"type": "mrkdwn", "text": f"<{_pipe}|Pipeline> · <{_prosp}|Prospecting> · `/{COMMAND_PREFIX}-pipeline-cleanup` to refresh"}],
     })
 
     return blocks

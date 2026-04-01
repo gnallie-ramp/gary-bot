@@ -43,7 +43,7 @@ from core.slack_formatter import (
     sf_account_url, sf_opp_url, format_currency, dashboard_url,
     build_sf_new_opp_url, opp_fields_summary,
 )
-from config import GREG_SLACK_ID, NTR_RATES
+from config import GREG_SLACK_ID, NTR_RATES, COMMAND_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -793,7 +793,7 @@ def _build_summary_blocks(date_str: str, groups: dict[str, list[dict]]) -> list[
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "\u2705 No urgent actions right now. Run `/gary-status` to verify connections.",
+                "text": f"\u2705 No urgent actions right now. Run `/{COMMAND_PREFIX}-status` to verify connections.",
             },
         })
         return blocks
@@ -1018,7 +1018,7 @@ def build_category_detail_blocks(category: str, user_id: str = None) -> list[dic
     if not items:
         return [{
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"No {category} items found. Run `/priorities` to refresh."},
+            "text": {"type": "mrkdwn", "text": f"No {category} items found. Run `/{COMMAND_PREFIX}-priorities` to refresh."},
         }]
 
     _TITLES = {
@@ -1197,7 +1197,7 @@ def build_category_detail_blocks(category: str, user_id: str = None) -> list[dic
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"*What next?* DM me {other_str} to see other categories · `/priorities` to refresh",
+                "text": f"*What next?* DM me {other_str} to see other categories · `/{COMMAND_PREFIX}-priorities` to refresh",
             }],
         })
 
