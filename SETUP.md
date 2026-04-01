@@ -155,12 +155,13 @@ Using ALL the values collected in Phase 1 and Phase 4, write the .env file at ~/
 Then create the Snowflake config at ~/.snowflake/config.toml (create the directory if needed):
 
   [connections.default]
-  account = "ramp"
+  account = "rib11536.us-east-1"
   user = "<their ramp email>"
   authenticator = "externalbrowser"
   warehouse = "READER"
   database = "ANALYTICS"
-  role = "DEPT-SALES"
+  schema = "PUBLIC"
+  role = "READER"
 
 Set permissions: chmod 0600 ~/.snowflake/config.toml
 
