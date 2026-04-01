@@ -139,7 +139,7 @@ gh auth login
 ### Clone repo and install Python dependencies
 cd ~
 git clone https://github.com/gnallie-ramp/gary-bot.git
-cd ~/gary-bot/slack_bot
+cd ~/gary-bot
 python3.12 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -184,7 +184,7 @@ npx mcp-remote https://mcp.gumloop.com/gong/mcp
 # (This opens a browser — I'll authorize there)
 
 ### Start the bot
-cd ~/gary-bot/slack_bot
+cd ~/gary-bot
 source venv/bin/activate
 nohup venv/bin/python3 main.py >> nohup.out 2>&1 & disown
 
@@ -204,7 +204,7 @@ These weren't run in the automated section because they open a browser:
 
 ```bash
 # Snowflake — opens Okta SSO
-cd ~/gary-bot/slack_bot && source venv/bin/activate
+cd ~/gary-bot && source venv/bin/activate
 snow connection test
 
 # Google Calendar — opens Google sign-in
@@ -238,11 +238,11 @@ cat > ~/Library/LaunchAgents/com.gary-bot.plist << EOF
     <string>com.gary-bot</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$HOME/gary-bot/slack_bot/venv/bin/python3</string>
-        <string>$HOME/gary-bot/slack_bot/main.py</string>
+        <string>$HOME/gary-bot/venv/bin/python3</string>
+        <string>$HOME/gary-bot/main.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>$HOME/gary-bot/slack_bot</string>
+    <string>$HOME/gary-bot</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -279,7 +279,6 @@ When Greg pushes updates:
 ```bash
 cd ~/gary-bot
 git pull
-cd slack_bot
 source venv/bin/activate
 pip install -r requirements.txt
 # Restart (pick one):
@@ -343,7 +342,7 @@ cat ~/.gary_bot_users.json | python3 -m json.tool
 | `command not found: gh` or `node` | Run the Homebrew PATH commands — you likely skipped them after install |
 | `zsh: unknown file attribute: h` | Smart/curly quotes were pasted instead of straight quotes. Type the command manually or paste into a plain-text editor first |
 | Markdown links in Terminal | URLs showing as `[text](url)` means markdown formatting was copied. Paste just the plain URL |
-| `No module named 'slack_bolt'` | Not in virtualenv: `cd ~/gary-bot/slack_bot && source venv/bin/activate` |
+| `No module named 'slack_bolt'` | Not in virtualenv: `cd ~/gary-bot && source venv/bin/activate` |
 | `No module named 'google.auth'` | Run `pip install google-auth google-auth-oauthlib google-api-python-client` inside the virtualenv |
 | Snowflake: `Bad owner or permissions` | Run `chmod 0600 ~/.snowflake/config.toml` |
 | Snowflake: `User is empty` | Add `user = "you@ramp.com"` to `~/.snowflake/config.toml` |
