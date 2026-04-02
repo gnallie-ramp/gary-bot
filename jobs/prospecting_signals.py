@@ -177,7 +177,9 @@ def _classify_signals(row: dict) -> list:
     is_plus = plus_status == "active"
     is_grandfathered = "grandfathered" in plus_status
     has_erp = erp in _ERP_PROVIDERS
-    bp_active = bp_status == "active"
+    bp_l30d = _safe_float(row.get("billpay_spend_l30d"))
+    # Trust actual spend over status field — "churned" accounts with $200K/mo BP are not churned
+    bp_active = bp_status == "active" or bp_l30d >= 5000
 
     # 1. TTS Plus or Procurement (high propensity, not already on it)
     if not is_plus and (prob_plus >= 40 or prob_procurement >= 50):
