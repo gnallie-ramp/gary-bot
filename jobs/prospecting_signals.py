@@ -100,6 +100,9 @@ SELECT
     bob.prob_attach_score_ramp_plus,
     bob.prob_attach_score_travel,
     bob.prob_attach_score_treasury,
+    -- AE estimated spend (from SFDC account)
+    sa.ae_qualified_monthly_spend AS ae_est_card_spend,
+    sa.ae_estimated_bill_pay_spend AS ae_est_bp_spend,
     -- Contact info
     bob.primary_customer_poc_email,
     bob.primary_ramp_champion_email,
@@ -305,6 +308,8 @@ def gather_prospecting_signals(user_id: Optional[str] = None, force: bool = Fals
                 "off_ramp_bp_spend": _safe_float(row_dict.get("off_ramp_bp_spend")),
                 "bp_competitor_name": str(row_dict.get("bp_competitor_name") or ""),
                 "unmanaged_travel_spend": _safe_float(row_dict.get("unmanaged_travel_spend")),
+                "ae_est_card_spend": _safe_float(row_dict.get("ae_est_card_spend")),
+                "ae_est_bp_spend": _safe_float(row_dict.get("ae_est_bp_spend")),
                 "erp": row_dict.get("accounting_provider_type") or "",
                 "plus_status": row_dict.get("plus_product_status_v2") or "",
                 "poc_email": row_dict.get("primary_customer_poc_email") or "",

@@ -16,8 +16,9 @@ import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -28,6 +29,10 @@ _SERVER_HASH = hashlib.md5(_MCP_URL.encode()).hexdigest()
 _TOKEN_DIR = Path.home() / ".mcp-auth" / "mcp-remote-0.1.12"
 _TOKEN_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_tokens.json"
 _CLIENT_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_client_info.json"
+
+# Session cache: keyed by user_id (or "default") -> {"session": requests.Session, "initialized_at": float, "token": str}
+_session_cache: Dict[str, dict] = {}
+_SESSION_TTL = 300  # 5 minutes
 
 
 def _alert_sf_auth_failure(user_id: Optional[str], error: str = "") -> None:
@@ -68,27 +73,41 @@ def _load_access_token(user_id: Optional[str] = None) -> str:
     return tokens["access_token"]
 
 
-def _mcp_call(
-    method: str,
-    params: dict,
-    request_id: int = 1,
-    _retried: bool = False,
-    user_id: Optional[str] = None,
-    timeout: int = 30,
-) -> dict:
-    """Make a single MCP JSON-RPC call to the Gumstack Salesforce server.
+def _get_session(user_id: Optional[str] = None) -> Tuple[requests.Session, dict]:
+    """Return a cached, initialized MCP session for the given user.
 
-    On 401, alerts the user and raises.
+    If no valid cached session exists (missing, expired, or token changed),
+    creates a new requests.Session, runs the MCP initialize handshake,
+    and caches it.
+
+    Returns (session, headers_dict) ready for tool calls.
+    On 401 during init, alerts the user and raises.
     """
+    cache_key = user_id or "default"
     token = _load_access_token(user_id=user_id)
+    now = time.monotonic()
+
+    # Check for a valid cached session
+    cached = _session_cache.get(cache_key)
+    if cached is not None:
+        age = now - cached["initialized_at"]
+        if age < _SESSION_TTL and cached["token"] == token:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            return cached["session"], headers
+
+    # Cache miss or stale — create a new session and initialize
+    session = requests.Session()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
 
-    # Initialize session
-    init_resp = requests.post(
+    init_resp = session.post(
         _MCP_URL,
         json={
             "jsonrpc": "2.0",
@@ -105,20 +124,47 @@ def _mcp_call(
     )
 
     if init_resp.status_code == 401:
+        _session_cache.pop(cache_key, None)
         _alert_sf_auth_failure(user_id, "401 on init — re-auth at gumloop.com/personal/apps")
         init_resp.raise_for_status()
     init_resp.raise_for_status()
 
-    # Make the actual tool call
+    # Cache the initialized session
+    _session_cache[cache_key] = {
+        "session": session,
+        "initialized_at": now,
+        "token": token,
+    }
+    return session, headers
+
+
+def _mcp_call(
+    method: str,
+    params: dict,
+    request_id: int = 1,
+    _retried: bool = False,
+    user_id: Optional[str] = None,
+    timeout: int = 30,
+) -> dict:
+    """Make a single MCP JSON-RPC call to the Gumstack Salesforce server.
+
+    Uses a cached initialized session to avoid redundant initialize round-trips.
+    On 401, clears the session cache and alerts the user.
+    """
+    cache_key = user_id or "default"
+    session, headers = _get_session(user_id=user_id)
+
+    # Make the tool call (single round-trip — init was cached)
     payload = {
         "jsonrpc": "2.0",
         "id": request_id,
         "method": method,
         "params": params,
     }
-    resp = requests.post(_MCP_URL, json=payload, headers=headers, timeout=timeout)
+    resp = session.post(_MCP_URL, json=payload, headers=headers, timeout=timeout)
 
     if resp.status_code == 401:
+        _session_cache.pop(cache_key, None)
         _alert_sf_auth_failure(user_id, "401 on tool call — re-auth at gumloop.com/personal/apps")
     resp.raise_for_status()
     return _parse_response(resp)

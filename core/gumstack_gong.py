@@ -16,9 +16,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -30,6 +31,10 @@ _MCP_URL = "https://mcp.gumloop.com/gong/mcp"
 _SERVER_HASH = hashlib.md5(_MCP_URL.encode()).hexdigest()
 _TOKEN_DIR = Path.home() / ".mcp-auth" / "mcp-remote-0.1.12"
 _TOKEN_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_tokens.json"
+
+# Session cache: keyed by user_id (or "default") -> {"session": requests.Session, "initialized_at": float, "token": str}
+_session_cache: Dict[str, dict] = {}
+_SESSION_TTL = 300  # 5 minutes
 
 
 def _get_token_path(user_id: Optional[str] = None) -> str:
@@ -56,27 +61,41 @@ def _load_access_token(user_id: Optional[str] = None) -> str:
     return tokens["access_token"]
 
 
-def _mcp_call(
-    method: str,
-    params: dict,
-    request_id: int = 1,
-    user_id: Optional[str] = None,
-    _retried: bool = False,
-) -> dict:
-    """Make a single MCP JSON-RPC call to the Gumstack Gong server.
+def _get_session(user_id: Optional[str] = None, _retried: bool = False) -> Tuple[requests.Session, dict]:
+    """Return a cached, initialized MCP session for the given user.
 
-    On 401, attempts one token refresh before failing.
+    If no valid cached session exists (missing, expired, or token changed),
+    creates a new requests.Session, runs the MCP initialize handshake,
+    and caches it.
+
+    Returns (session, headers_dict) ready for tool calls.
+    On 401 during init, clears cache and retries once with refresh token.
     """
+    cache_key = user_id or "default"
     token = _load_access_token(user_id)
-    token_path = _get_token_path(user_id)
+    now = time.monotonic()
+
+    # Check for a valid cached session
+    cached = _session_cache.get(cache_key)
+    if cached is not None:
+        age = now - cached["initialized_at"]
+        if age < _SESSION_TTL and cached["token"] == token:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            return cached["session"], headers
+
+    # Cache miss or stale — create a new session and initialize
+    session = requests.Session()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
 
-    # Initialize session
-    init_resp = requests.post(
+    init_resp = session.post(
         _MCP_URL,
         json={
             "jsonrpc": "2.0",
@@ -92,9 +111,12 @@ def _mcp_call(
         timeout=15,
     )
 
+    # Handle 401 on init — clear cache and retry with refresh token
     if init_resp.status_code == 401 and not _retried:
-        logger.warning("Gumstack Gong 401 — token may be expired")
+        logger.warning("Gumstack Gong 401 on init — token may be expired")
+        _session_cache.pop(cache_key, None)
         try:
+            token_path = _get_token_path(user_id)
             with open(token_path) as f:
                 tokens = json.load(f)
             requests.post(
@@ -114,13 +136,37 @@ def _mcp_call(
                 },
                 timeout=15,
             )
-            return _mcp_call(method, params, request_id, user_id=user_id, _retried=True)
+            return _get_session(user_id=user_id, _retried=True)
         except Exception as e:
             logger.warning("Gong token refresh failed: %s", e)
     init_resp.raise_for_status()
 
-    # Make the actual tool call
-    resp = requests.post(
+    # Cache the initialized session
+    _session_cache[cache_key] = {
+        "session": session,
+        "initialized_at": now,
+        "token": token,
+    }
+    return session, headers
+
+
+def _mcp_call(
+    method: str,
+    params: dict,
+    request_id: int = 1,
+    user_id: Optional[str] = None,
+    _retried: bool = False,
+) -> dict:
+    """Make a single MCP JSON-RPC call to the Gumstack Gong server.
+
+    Uses a cached initialized session to avoid redundant initialize round-trips.
+    On 401, clears the session cache and retries once.
+    """
+    cache_key = user_id or "default"
+    session, headers = _get_session(user_id=user_id)
+
+    # Make the tool call (single round-trip — init was cached)
+    resp = session.post(
         _MCP_URL,
         json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
         headers=headers,
@@ -128,7 +174,8 @@ def _mcp_call(
     )
 
     if resp.status_code == 401 and not _retried:
-        logger.warning("Gumstack Gong 401 on tool call")
+        logger.warning("Gumstack Gong 401 on tool call — clearing session cache and retrying...")
+        _session_cache.pop(cache_key, None)
         return _mcp_call(method, params, request_id, user_id=user_id, _retried=True)
     resp.raise_for_status()
     return _parse_response(resp)

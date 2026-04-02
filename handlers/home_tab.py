@@ -581,6 +581,8 @@ def _build_prospecting_tab(client, user_id):
         off_ramp_bp = item.get("off_ramp_bp_spend", 0)
         bp_competitor_name = item.get("bp_competitor_name", "")
         unmanaged_travel = item.get("unmanaged_travel_spend", 0)
+        ae_est_card = item.get("ae_est_card_spend", 0)
+        ae_est_bp = item.get("ae_est_bp_spend", 0)
         meta = SIGNAL_META.get(signal_key, {})
         emoji = meta.get("emoji", ":mag:")
 
@@ -621,6 +623,19 @@ def _build_prospecting_tab(client, user_id):
                 spend_parts.append(f"BP L30D: ${bp_l30d:,.0f}")
         if spend_parts:
             lines.append(" · ".join(spend_parts))
+
+        # AE estimates + off-ramp BP (shown on all signals for context)
+        est_parts = []
+        if ae_est_card > 0:
+            est_parts.append(f"AE Est Card: ${ae_est_card:,.0f}/mo")
+        if ae_est_bp > 0:
+            est_parts.append(f"AE Est BP: ${ae_est_bp:,.0f}/mo")
+        # Show off-ramp BP on signals that don't already show it above
+        if off_ramp_bp > 0 and signal_key not in ("erp_no_billpay", "high_competitor_spend"):
+            bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
+            est_parts.append(f"Off-Ramp BP: ${off_ramp_bp:,.0f}/mo{bp_comp_label}")
+        if est_parts:
+            lines.append(" · ".join(est_parts))
 
         # Touch + opp status
         status_parts = [f"{days}d since last touch"]
