@@ -637,8 +637,10 @@ def _build_prospecting_tab(client, user_id):
         if est_parts:
             lines.append(" · ".join(est_parts))
 
-        # Touch + opp status
-        status_parts = [f"{days}d since last touch"]
+        # Plus status + touch + opp status
+        plus_status = item.get("plus_status", "")
+        plus_label = plus_status.title() if plus_status else "No Plus"
+        status_parts = [f"Plus: {plus_label}", f"{days}d since last touch"]
         if has_opp:
             status_parts.append("has open opp")
         lines.append(" · ".join(status_parts))

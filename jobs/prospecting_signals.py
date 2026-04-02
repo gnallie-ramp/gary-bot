@@ -174,7 +174,7 @@ def _classify_signals(row: dict) -> list:
     prob_plus = _safe_float(row.get("prob_attach_score_ramp_plus"))
     prob_procurement = _safe_float(row.get("prob_attach_score_procurement"))
 
-    is_plus = plus_status == "active"
+    is_plus = plus_status in ("active", "in trial")
     is_grandfathered = "grandfathered" in plus_status
     has_erp = erp in _ERP_PROVIDERS
     bp_l30d = _safe_float(row.get("billpay_spend_l30d"))
