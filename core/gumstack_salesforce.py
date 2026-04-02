@@ -121,7 +121,24 @@ def _mcp_call(
     if resp.status_code == 401:
         _alert_sf_auth_failure(user_id, "401 on tool call — re-auth at gumloop.com/personal/apps")
     resp.raise_for_status()
-    return resp.json()
+    return _parse_response(resp)
+
+
+def _parse_response(resp) -> dict:
+    """Parse an MCP response that may be JSON or SSE (text/event-stream)."""
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            try:
+                return json.loads(line[6:])
+            except (json.JSONDecodeError, ValueError):
+                continue
+    logger.error("Gumstack SF: could not parse response (%d bytes): %s",
+                 len(resp.text), resp.text[:200])
+    return {}
 
 
 def _extract_text(result: dict) -> str:

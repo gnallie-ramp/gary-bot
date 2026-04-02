@@ -131,7 +131,24 @@ def _mcp_call(
         logger.warning("Gumstack Gong 401 on tool call")
         return _mcp_call(method, params, request_id, user_id=user_id, _retried=True)
     resp.raise_for_status()
-    return resp.json()
+    return _parse_response(resp)
+
+
+def _parse_response(resp) -> dict:
+    """Parse an MCP response that may be JSON or SSE (text/event-stream)."""
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            try:
+                return json.loads(line[6:])
+            except (json.JSONDecodeError, ValueError):
+                continue
+    logger.error("Gumstack Gong: could not parse response (%d bytes): %s",
+                 len(resp.text), resp.text[:200])
+    return {}
 
 
 def is_available(user_id: Optional[str] = None) -> bool:

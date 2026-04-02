@@ -122,6 +122,30 @@ def _refresh_token(user_id: Optional[str] = None) -> str:
     return tokens["access_token"]
 
 
+def _parse_response(resp: requests.Response) -> dict:
+    """Parse an MCP response that may be JSON or SSE (text/event-stream).
+
+    Gumstack sometimes returns SSE format instead of plain JSON.
+    In SSE, the JSON payload is on lines prefixed with 'data: '.
+    """
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fall back to SSE parsing
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            try:
+                return json.loads(line[6:])
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+    logger.error("Gumstack Gmail: could not parse response (%d bytes): %s",
+                 len(resp.text), resp.text[:200])
+    return {}
+
+
 def _mcp_call(
     method: str,
     params: dict,
@@ -191,7 +215,7 @@ def _mcp_call(
     if resp.status_code == 401:
         _alert_gmail_auth_failure(user_id, "401 on tool call — token refresh failed")
     resp.raise_for_status()
-    return resp.json()
+    return _parse_response(resp)
 
 
 # ── Label resolution ─────────────────────────────────────────────────────────
