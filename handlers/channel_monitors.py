@@ -1222,16 +1222,25 @@ def backfill_missed_messages(client, lookback_seconds: int | None = None):
     oldest = str(time.time() - (lookback_seconds or BACKFILL_LOOKBACK_SECONDS))
     total_processed = 0
 
+    lookback_h = (lookback_seconds or BACKFILL_LOOKBACK_SECONDS) // 3600
+
     for channel_id, (key, handler) in _channel_handlers.items():
         try:
-            result = client.conversations_history(
-                channel=channel_id,
-                oldest=oldest,
-                limit=200,
-            )
-            messages = result.get("messages", [])
+            # Paginate through ALL messages in the lookback window
+            messages = []
+            cursor = None
+            while True:
+                kwargs = {"channel": channel_id, "oldest": oldest, "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                result = client.conversations_history(**kwargs)
+                messages.extend(result.get("messages", []))
+                cursor = result.get("response_metadata", {}).get("next_cursor")
+                if not cursor or len(messages) > 2000:
+                    break
+
             logger.info("Backfill: %s — found %d messages in last %dh",
-                        key, len(messages), BACKFILL_LOOKBACK_SECONDS // 3600)
+                        key, len(messages), lookback_h)
 
             for msg in messages:
                 text = msg.get("text", "")
