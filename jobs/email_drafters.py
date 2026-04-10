@@ -455,9 +455,13 @@ def handle_pclip_alert(text, ts, client, user_id=None):
         clean = re.sub(r'\*([A-Za-z /]+(?:\(s\))?):?\*', r'\1:', text)
 
         # ── Extract fields ────────────────────────────────────────────────
-        company_name = _extract_field(
+        company_name_raw = _extract_field(
             r'Business Name:\s*(.+)', clean, "Unknown Company"
         )
+        # Extract business_id from parens e.g. "GH Luxe (1739835)"
+        biz_id_match = re.search(r'\((\d+)\)', company_name_raw)
+        business_id = biz_id_match.group(1) if biz_id_match else ""
+        company_name = re.sub(r'\s*\(\d+\)\s*', '', company_name_raw).strip()
 
         # Accepting user (may be just a name, no email in PCLIP alerts)
         accepted_by = _extract_field(r'Accepted by:\s*(.+)', clean, "")
@@ -512,6 +516,34 @@ def handle_pclip_alert(text, ts, client, user_id=None):
             if accepted_contact.get("email"):
                 contacts.append(accepted_contact)
 
+        # If accepted_by has no email, look them up via Snowflake contacts
+        accepted_by_email = ""
+        if accepted_by and not any(c.get("name", "").lower() == accepted_by.lower() for c in contacts if c.get("email")):
+            try:
+                from utils.account_resolver import fetch_contact_emails, best_contact_match
+                # Resolve account_id from business_id
+                if business_id:
+                    from core.snowflake_client import run_query
+                    acct_df = run_query(
+                        f"SELECT account_id FROM analytics.marts.dim_sfdc_accounts "
+                        f"WHERE business_id = '{business_id}' LIMIT 1"
+                    )
+                    if not acct_df.empty:
+                        account_id = acct_df.iloc[0]["account_id"]
+                        contacts_by_acct = fetch_contact_emails(None, [account_id])
+                        acct_contacts = contacts_by_acct.get(account_id, [])
+                        matched = best_contact_match(accepted_by, acct_contacts)
+                        if matched and matched.get("email"):
+                            accepted_by_email = matched["email"]
+                            contacts.append({
+                                "name": matched.get("name", accepted_by),
+                                "email": matched["email"],
+                                "first_name": matched.get("name", "").split()[0] if matched.get("name") else "",
+                            })
+                            logger.info("PCLIP: resolved accepted_by '%s' -> %s", accepted_by, matched["email"])
+            except Exception as e:
+                logger.debug("PCLIP: could not resolve accepted_by email: %s", e)
+
         contacts = _dedup_contacts(contacts)
 
         if not contacts:
@@ -539,10 +571,12 @@ def handle_pclip_alert(text, ts, client, user_id=None):
         )
 
         # ── DM Greg ───────────────────────────────────────────────────────
+        accepted_detail = f" ({accepted_by_email})" if accepted_by_email else ""
         details = (
             f"*To:* {to_emails}\n"
             f"*Subject:* {subject}\n"
             f"*Company:* {company_name}\n"
+            f"*Accepted by:* {accepted_by}{accepted_detail}\n"
             f"*Old Limit:* {old_limit_fmt}  |  *New Limit:* {new_limit_fmt}\n"
             f"*Increase:* {_format_dollars(limit_increase)}"
         )

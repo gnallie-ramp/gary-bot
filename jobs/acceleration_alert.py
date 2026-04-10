@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 SF_BASE_URL = "https://rampfinancial.lightning.force.com/lightning"
 
 # Only surface these time-sensitive signal types in real-time DMs
-_URGENT_SIGNALS = {"early_accel", "close_window", "leading", "first_bill", "treasury_spike"}
+_URGENT_SIGNALS = {"early_accel", "close_window", "leading", "first_bill", "opp_first_spend", "treasury_spike"}
 
 # Persistent cache file for already-notified signals
 _SEEN_CACHE_PATH = Path.home() / ".gary_bot_seen_signals.json"
@@ -169,6 +169,7 @@ def _signal_to_category(signal_type):
         "close_window": "close_window",
         "leading": "prospect",
         "first_bill": "zero_to_one",
+        "opp_first_spend": "zero_to_one",
         "close_now": "close_now",
         "zero_to_one": "zero_to_one",
         "sustained_accel": "prospect",
@@ -212,6 +213,14 @@ def _format_signal_entry(row, signal_type):
             f"\u2022 {_acct_link(row)} — *first bill created* in Ramp "
             f"(${paced:,})"
             f"\n   _Bill Pay opp open — customer just started using the product_{cp_str}"
+        )
+    elif signal_type == "opp_first_spend":
+        spend_since = _safe_int(row.get("spend_since_opp", 0))
+        since_str = f" ({format_currency(spend_since)} since opp)" if spend_since > 0 else ""
+        text = (
+            f"\u2022 {_acct_link(row)} — {product} *first spend detected*"
+            f"\n   L7D ${l7d:,}{since_str}{cp_str}"
+            f"\n   _Open opp went from $0 to first spend — close now while baseline is near $0_"
         )
     elif signal_type == "treasury_spike":
         spike_pct = _pct(paced, l30d) if l30d > 0 else 0
@@ -360,6 +369,7 @@ def _send_realtime_alerts(client, rows, now, dm_target=None):
         "close_window": ":alarm_clock: Close Window — Opp Ramping",
         "leading": ":eyes: Large Bills Incoming",
         "first_bill": ":tada: First Bill Created",
+        "opp_first_spend": ":bulb: First Spend Detected — New Activation",
         "treasury_spike": ":moneybag: Treasury GLA Spike",
     }
 
@@ -436,6 +446,7 @@ def _send_daily_summary(client, urgent, now, dm_target=None):
         ("close_window", ":alarm_clock: *Close Window — Opp Ramping*"),
         ("leading", ":eyes: *Bills Created/Scheduled — Spend Incoming*"),
         ("first_bill", ":tada: *First Bill Created — Bill Pay Opp Active*"),
+        ("opp_first_spend", ":bulb: *First Spend Detected — New Activation*"),
         ("treasury_spike", ":moneybag: *Treasury GLA Spike — Large Deposit*"),
     ]
 

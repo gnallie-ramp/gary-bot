@@ -776,7 +776,7 @@ WHERE DATEDIFF('day',
         COALESCE(lc.last_call_date,  '2000-01-01')
     ),
     CURRENT_DATE
-) >= 21
+) >= 15
 ORDER BY days_since_last_touch DESC
 """
 
@@ -2749,12 +2749,58 @@ treasury_spike AS (
       AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id AND sac.product = 'Treasury Expansion')
       AND NOT EXISTS (SELECT 1 FROM close_now cn WHERE cn.account_id = sa.account_id)
 ),
+-- Signal 9: opp_first_spend — open opp where product went from ~$0 to ANY spend
+-- Catches 0-to-1 activations that are too small for other signal thresholds
+-- (e.g. Aligned Dental: card opp, $0 → $700 — missed by close_now's $5K floor)
+opp_first_spend AS (
+    SELECT
+        'opp_first_spend' AS signal_type,
+        oo.opportunity_name,
+        oo.account_name,
+        oo.expansion_subtype AS product,
+        oo.opportunity_id,
+        oo.account_id,
+        NULL::number AS l30d_spend_delta,
+        NULL::date AS activation_date,
+        NULL::number AS paced_amount,
+        NULL::number AS baseline_amount,
+        COALESCE(zs.spend_since_opp, 0) AS spend_since_opp,
+        COALESCE(zs.spend_l30d, 0) AS spend_l30d,
+        COALESCE(zs.spend_l7d, 0) AS spend_l7d
+    FROM open_opps oo
+    JOIN current_snapshot cs ON cs.account_id = oo.account_id
+    LEFT JOIN zero_to_one_spend zs ON zs.opportunity_id = oo.opportunity_id
+    WHERE (
+        -- Card: L90D near zero, L7D has activity
+        (oo.expansion_subtype = 'Card Expansion'
+            AND cs.card_l90d < 100
+            AND cs.card_l7d > 0)
+        -- Bill Pay: L90D near zero, L7D has activity
+        OR (oo.expansion_subtype = 'Bill Pay Expansion'
+            AND cs.bill_l90d < 100
+            AND cs.bill_l7d > 0)
+        -- Travel: L90D near zero, L7D has activity
+        OR (oo.expansion_subtype = 'Travel Expansion'
+            AND cs.travel_l90d < 100
+            AND cs.travel_l7d > 0)
+        -- Treasury: L90D near zero, L7D has balance
+        OR (oo.expansion_subtype = 'Treasury Expansion'
+            AND cs.treasury_l90d < 100
+            AND cs.treasury_l7d > 0)
+    )
+    -- Don't duplicate opps already caught by other signals
+    AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM close_now)
+    AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM zero_to_one WHERE opportunity_id IS NOT NULL)
+    AND oo.opportunity_id NOT IN (SELECT opportunity_id FROM close_window WHERE opportunity_id IS NOT NULL)
+),
 combined AS (
     SELECT * FROM close_now
     UNION ALL
     SELECT * FROM close_window
     UNION ALL
     SELECT * FROM zero_to_one
+    UNION ALL
+    SELECT * FROM opp_first_spend
     UNION ALL
     SELECT * FROM early_accel
     UNION ALL
@@ -2795,10 +2841,10 @@ ranked AS (
         *,
         ROUND(
             CASE product
-                WHEN 'Card Expansion'     THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0095 * 3
-                WHEN 'Bill Pay Expansion' THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0015 * 3
-                WHEN 'Travel Expansion'   THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.035  * 3
-                WHEN 'Treasury Expansion' THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0005 * 3
+                WHEN 'Card Expansion'     THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0095 * 3
+                WHEN 'Bill Pay Expansion' THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0015 * 3
+                WHEN 'Travel Expansion'   THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.035  * 3
+                WHEN 'Treasury Expansion' THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0005 * 3
                 ELSE 0
             END
         ) AS est_cp,
@@ -2806,10 +2852,10 @@ ranked AS (
             PARTITION BY signal_type
             ORDER BY ROUND(
                 CASE product
-                    WHEN 'Card Expansion'     THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0095 * 3
-                    WHEN 'Bill Pay Expansion' THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0015 * 3
-                    WHEN 'Travel Expansion'   THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.035  * 3
-                    WHEN 'Treasury Expansion' THEN CASE WHEN signal_type = 'zero_to_one' THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0005 * 3
+                    WHEN 'Card Expansion'     THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0095 * 3
+                    WHEN 'Bill Pay Expansion' THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0015 * 3
+                    WHEN 'Travel Expansion'   THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.035  * 3
+                    WHEN 'Treasury Expansion' THEN CASE WHEN signal_type IN ('zero_to_one', 'opp_first_spend') THEN COALESCE(spend_l30d, 0) ELSE COALESCE(l30d_spend_delta, paced_amount - baseline_amount, 0) END * 0.0005 * 3
                     ELSE 0
                 END
             ) DESC
@@ -2836,9 +2882,10 @@ ORDER BY
         WHEN 'leading'          THEN 3
         WHEN 'first_bill'       THEN 4
         WHEN 'close_now'        THEN 5
-        WHEN 'zero_to_one'      THEN 6
-        WHEN 'sustained_accel'  THEN 7
-        WHEN 'treasury_spike'   THEN 8
+        WHEN 'opp_first_spend'  THEN 6
+        WHEN 'zero_to_one'      THEN 7
+        WHEN 'sustained_accel'  THEN 8
+        WHEN 'treasury_spike'   THEN 9
     END,
     est_cp DESC
 """

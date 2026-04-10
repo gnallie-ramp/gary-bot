@@ -14,10 +14,10 @@ import threading
 import time
 
 # Limit concurrent draft threads to prevent Snowflake connection overload
-_draft_semaphore = threading.Semaphore(3)
+_draft_semaphore = threading.Semaphore(6)
 
 from config import GREG_SLACK_ID, COMMAND_PREFIX
-from core.user_registry import get_user_sf_name, get_user_first_name, get_user_booking_link
+from core.user_registry import get_user_sf_name, get_user_first_name, get_user_booking_link, get_user_email
 
 logger = logging.getLogger(__name__)
 
@@ -726,6 +726,12 @@ def register_interactive_handlers(app):
         user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         _send_category_detail(client, "first_bill", user_id)
 
+    @app.action("priority_show_opp_first_spend")
+    def handle_show_opp_first_spend(ack, body, client):
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _send_category_detail(client, "opp_first_spend", user_id)
+
     @app.action("priority_show_zero_to_one")
     def handle_show_zero_to_one(ack, body, client):
         ack()
@@ -1091,8 +1097,8 @@ def register_interactive_handlers(app):
                     cat_map = {
                         "early_accel": "prospect", "close_window": "close_window",
                         "leading": "prospect", "first_bill": "zero_to_one",
-                        "close_now": "close_now", "zero_to_one": "zero_to_one",
-                        "sustained_accel": "prospect",
+                        "close_now": "close_now", "opp_first_spend": "zero_to_one",
+                        "zero_to_one": "zero_to_one", "sustained_accel": "prospect",
                     }
                     payload = json.dumps({
                         "account": acct_name,
@@ -1373,6 +1379,101 @@ def _draft_procurement_trial_template(account_id, account_name, client, user_id=
 # ── Smart Email Drafter ─────────────────────────────────────────────────────
 
 
+def _find_existing_thread(contact_email: str, product: str, owner_email: str, user_id=None):
+    """Search Gmail for the best existing thread to reply to.
+
+    Returns a dict with thread info if a suitable thread is found:
+        {thread_id, subject, to, cc, message_id, last_message_from}
+    Or None if no suitable thread exists.
+
+    Rules:
+    - Must be a thread where owner_email participated (sent or received)
+    - Must be a thread where the contact_email is a recipient
+    - Prefer threads where the owner sent the most recent message (outbound-last)
+    - Prefer threads whose subject relates to the product
+    - Never reply to a thread the owner has NOT participated in
+    """
+    from core.gumstack_gmail import read_emails, get_thread
+
+    try:
+        # Search for threads with this contact that I participated in
+        query = f"to:{contact_email} OR from:{contact_email}"
+        emails = read_emails(query, max_results=10, user_id=user_id)
+        if not emails:
+            return None
+
+        # Group by threadId, keep most recent per thread
+        threads_seen = {}
+        for em in emails:
+            tid = em.get("threadId", "")
+            if not tid or tid in threads_seen:
+                continue
+            threads_seen[tid] = em
+
+        # Score and rank threads
+        best = None
+        best_score = -1
+        owner_lower = owner_email.lower()
+        contact_lower = contact_email.lower()
+        product_lower = (product or "").lower()
+
+        for tid, em in threads_seen.items():
+            subject = em.get("subject", "")
+            from_addr = em.get("from", "").lower()
+            score = 0
+
+            # Must have owner involvement — check thread messages
+            thread_msgs = get_thread(tid, user_id=user_id)
+            if not thread_msgs:
+                continue
+
+            # Check that owner has sent at least one message in this thread
+            owner_sent = any(owner_lower in msg.get("from", "").lower() for msg in thread_msgs)
+            if not owner_sent:
+                continue  # Skip threads where I never responded
+
+            # Score: owner sent the last message (outbound-last = follow-up opportunity)
+            last_msg = thread_msgs[-1]
+            last_from = last_msg.get("from", "").lower()
+            if owner_lower in last_from:
+                score += 20  # Good: I sent last, they didn't reply — follow up
+            else:
+                score += 10  # They replied last — respond to them
+
+            # Score: subject relevance to product
+            if product_lower and product_lower in subject.lower():
+                score += 30
+            elif any(kw in subject.lower() for kw in ["ramp", "expansion", "follow", "check-in", "intro"]):
+                score += 10
+
+            # Score: recency (prefer more recent)
+            score += 5  # baseline — all threads get some recency since we searched broadly
+
+            if score > best_score:
+                best_score = score
+                # Extract reply-to info from the last message
+                last_to = last_msg.get("to", "")
+                last_cc = last_msg.get("cc", "")
+                last_headers = last_msg.get("headers", {})
+                message_id = last_headers.get("Message-Id") or last_headers.get("Message-ID") or ""
+
+                best = {
+                    "thread_id": tid,
+                    "subject": subject,
+                    "to": last_to,
+                    "cc": last_cc,
+                    "message_id": message_id,
+                    "last_message_from": last_from,
+                    "owner_sent_last": owner_lower in last_from,
+                }
+
+        return best
+
+    except Exception as e:
+        logger.debug("Thread search failed for %s: %s", contact_email, e)
+        return None
+
+
 def _draft_smart_email(account_id, account_name, opp_id, product, category, client, user_id=None):
     """Generate and send a context-aware outreach email draft.
 
@@ -1396,6 +1497,8 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     from config import NTR_RATES
 
     # ── 1. Fetch all context in parallel (contacts, gong, notes, emails) ──
+    import time as _time
+    _t0 = _time.time()
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _fetch_contacts():
@@ -1464,6 +1567,9 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
                     emails_df = result
             except Exception as e:
                 logger.debug("Context fetch %s failed for %s: %s", key, account_id, e)
+
+    logger.info("Draft %s: parallel fetch done in %.1fs", account_name, _time.time() - _t0)
+    _t1 = _time.time()
 
     # Parse Gong results
     gong_participants = set()
@@ -1604,7 +1710,7 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     elif category == "followup":
         goal = "follow up after a recent meeting with a clear next step"
         tone_note = "Reference what was discussed in the meeting and propose a concrete next step."
-    elif category == "zero_to_one":
+    elif category in ("zero_to_one", "opp_first_spend"):
         goal = (
             "reach out about their new product activation and explore the expansion opportunity. "
             "They just started using a new Ramp product"
@@ -1787,6 +1893,9 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         )
         cc_context = f"\nCC'd: {cc_names}\nThis email will also CC additional stakeholders. Address the TO contact by name but write for a broader audience — avoid language that only makes sense to one person."
 
+    logger.info("Draft %s: contact selection done in %.1fs", account_name, _time.time() - _t1)
+    _t2 = _time.time()
+
     prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, {goal}.
 
 Account: {account_name}
@@ -1808,38 +1917,72 @@ Competitors mentioned:
 Recent Email History:
 {email_comms if email_comms else 'No recent emails'}
 
-Write an email from {first_name_owner} to {first_name or 'the contact'} following this EXACT structure:
+Write a fully contextual email from {first_name_owner} to {first_name or 'the contact'}. {tone_note}
 
-1. OPENING: {opening_instruction}
+OPENING: {opening_instruction}
 
-2. CONTEXT INSERT (1-2 sentences MAX): Write a short, natural observation based on the signal context. {tone_note}
-   - Reference SPECIFIC context above if available (past calls, emails, notes, product requests, competitors)
-   - Must feel helpful, not like you're monitoring their usage
-   - If there's nothing specific, write a general observation about their Ramp usage or growth
+BODY — Write 2-4 short paragraphs that are ENTIRELY driven by the context above. Do NOT use generic bullet points. Instead:
 
-3. DISCUSSION TOPICS: Include this paragraph and bullet list EXACTLY:
-   "I had some ideas for potential discussion/optimization areas and wanted to see if you're open to briefly connecting on:"
-   • Migration/onboarding assistance if moving things over
-   • Adding any other businesses to Ramp
-   • Uncover savings from migrating ACH payments → card
-   • Best practices to achieve the most value + time savings
-   • Glimpse of the roadmap for 2026
+1. Reference what was specifically discussed on the last call or in recent emails — topics, pain points, product requests, tools mentioned. Be specific: name the product, the integration, the competitor, the workflow issue. If they mentioned a specific problem (e.g. "QuickBooks sync not working post-migration"), reference it directly.
 
-4. CTA: "Feel free to select any time through <a href="{booking_link}">this link</a> or let me know when works for you, looking forward to it!"
+2. If competitors were mentioned (e.g. Bill.com, Brex), acknowledge them naturally and position how Ramp addresses the gap — don't trash them, just show the alternative.
 
-5. SIGN OFF: "Best,<br>{first_name_owner}"
+3. If there are open items or unanswered questions from past conversations, address them. If they replied and you haven't responded, acknowledge the gap.
+
+4. Connect back to the opp objective: why this matters for them (not for you). Frame the value of reconnecting around THEIR needs that surfaced in past conversations.
+
+5. End with a clear, specific CTA. Propose a quick call to discuss the specific topics you just referenced, not a generic "catch up." Include booking link: <a href="{booking_link}">this link</a>
+
+SIGN OFF: "Best,<br>{first_name_owner}"
 
 Rules:
-- The context insert is the ONLY part that should vary per email. Keep it short (1-2 sentences).
-- If competitors or product requests were mentioned in calls, weave them into the context insert naturally
-- Return the full email body as HTML (use <p> tags, <ul>/<li> for bullets)
-- Do NOT include a subject line
-- Total email should be under 150 words"""
+- Every sentence should reference something specific from the context above — if you can't tie it to a real data point, cut it
+- NO generic filler like "optimize your setup", "maximize value", "best practices", "roadmap for 2026"
+- NO hardcoded bullet point lists — if you use bullets, they must be specific to this account's situation
+- Tone: warm, helpful, consultative — like a trusted advisor checking in, not a sales template
+- Return ONLY the email body as HTML (use <p>, <strong>, <ul>/<li>, <a>, <br> tags)
+- Do NOT include a subject line — it will be generated separately
+- Keep it concise: 100-200 words. Shorter is better. Every word should earn its place.
+- If there is genuinely no context available (no calls, no emails, no notes), then and ONLY then write a brief intro email asking to connect. But this should be rare given the data above."""
 
-    body_text = call_claude(prompt, max_tokens=512)
+    # ── 5. Search for existing thread + generate email body in parallel ──
+    owner_email = get_user_email(user_id) if user_id else ""
+    thread_info = None
+    _thread_categories = ("stale", "followup", "reopen", "close_window", "close_now")
 
-    # ── 5. Generate subject line ──
-    subject = "Ramp AM Intro"
+    if owner_email and category in _thread_categories:
+        # Run thread search and Claude call in parallel
+        from concurrent.futures import ThreadPoolExecutor as _TP
+        with _TP(max_workers=2) as tp:
+            thread_future = tp.submit(
+                _find_existing_thread, contact_email, product, owner_email, user_id
+            )
+            claude_future = tp.submit(call_claude, prompt, 1024)
+            try:
+                thread_info = thread_future.result()
+                if thread_info:
+                    logger.info("Found existing thread for %s: %s", account_name, thread_info["subject"])
+            except Exception as e:
+                logger.debug("Thread search failed: %s", e)
+            body_text = claude_future.result()
+    else:
+        body_text = call_claude(prompt, max_tokens=1024)
+
+    logger.info("Draft %s: Claude + thread search done in %.1fs", account_name, _time.time() - _t2)
+
+    # ── 5b. Generate subject line ──
+    if thread_info:
+        orig_subject = thread_info["subject"]
+        subject = orig_subject if orig_subject.lower().startswith("re:") else f"Re: {orig_subject}"
+    else:
+        # Dynamic subject based on context
+        subj_parts = [f"Ramp {product or 'Follow-Up'}"]
+        if last_call_name:
+            subj_parts = [f"Ramp Follow-Up — {last_call_name[:40]}"]
+        elif product_requests:
+            topic = product_requests.split("|")[0].strip()[:40]
+            subj_parts = [f"Ramp — {topic}"]
+        subject = subj_parts[0]
 
     # ── 6. Build HTML + send draft ──
     try:
@@ -1869,16 +2012,40 @@ Rules:
         else "Claude Drafts/Prospecting"
     )
 
+    # When replying to a thread, use the thread's recipients
+    draft_to = contact_email
+    draft_cc = cc_string
+    if thread_info:
+        # Use the thread's last message recipients to maintain continuity
+        thread_to = thread_info.get("to", "")
+        thread_cc = thread_info.get("cc", "")
+        if thread_to and contact_email.lower() in thread_to.lower():
+            draft_to = contact_email  # Keep our selected primary contact as TO
+            # Merge thread CC with our CC, dedup
+            all_cc = set()
+            for addr in (thread_cc or "").split(","):
+                addr = addr.strip()
+                if addr and "@" in addr and owner_email.lower() not in addr.lower() and contact_email.lower() not in addr.lower():
+                    all_cc.add(addr)
+            for addr in (cc_string or "").split(","):
+                addr = addr.strip()
+                if addr and "@" in addr:
+                    all_cc.add(addr)
+            draft_cc = ", ".join(all_cc)
+
     draft_id = ""
     if gumstack_ok():
-        result = gumstack_create(
-            to=contact_email,
-            subject=subject,
-            html_body=html_body,
-            cc=cc_string,
-            label=draft_label,
-            user_id=user_id,
-        )
+        # Build draft arguments
+        draft_kwargs = {
+            "to": draft_to,
+            "subject": subject,
+            "html_body": html_body,
+            "cc": draft_cc,
+            "label": draft_label,
+            "user_id": user_id,
+        }
+
+        result = gumstack_create(**draft_kwargs)
         if result["success"]:
             draft_id = result["draft_id"]
         else:
@@ -1934,10 +2101,20 @@ Rules:
 
     preview_text = re.sub(r'<br\s*/?>', '\n', body_text)
     preview_text = re.sub(r'<[^>]+>', '', preview_text)
+
+    thread_line = ""
+    if thread_info:
+        orig_subj = thread_info["subject"]
+        if thread_info.get("owner_sent_last"):
+            thread_line = f"\n:thread: *Replying to thread:* _{orig_subj}_ (you sent last — following up)"
+        else:
+            thread_line = f"\n:thread: *Replying to thread:* _{orig_subj}_ (they replied — responding)"
+
     details = (
         f"{to_line}{cc_line}\n"
         f"*Subject:* {subject}\n"
-        f"*Account:* {account_name} — {product or 'Expansion'}\n\n"
+        f"*Account:* {account_name} — {product or 'Expansion'}"
+        f"{thread_line}\n\n"
         f"*Preview:*\n{preview_text[:500]}"
     )
 
@@ -1950,5 +2127,5 @@ Rules:
     client.chat_postMessage(
         channel=dm_target,
         blocks=blocks,
-        text=f"{drafter_type} draft ready for {account_name}",
+        text=f"{drafter_type} draft ready for {account_name}  ({_time.time() - _t0:.0f}s)",
     )

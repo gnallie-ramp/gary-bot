@@ -25,6 +25,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 _MCP_URL = "https://mcp.gumloop.com/salesforce/mcp"
+_OAUTH_TOKEN_URL = "https://api.gumloop.com/oauth/token"
+_GLASS_CREDS = Path.home() / ".project-glass" / "credentials.json"
+_GLASS_SF_KEY = "gumstack-salesforce|"
 _SERVER_HASH = hashlib.md5(_MCP_URL.encode()).hexdigest()
 _TOKEN_DIR = Path.home() / ".mcp-auth" / "mcp-remote-0.1.12"
 _TOKEN_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_tokens.json"
@@ -63,8 +66,78 @@ def _get_token_paths(user_id: Optional[str] = None) -> tuple[str, str]:
     return str(_TOKEN_FILE), str(_CLIENT_FILE)
 
 
+def _refresh_token(user_id: Optional[str] = None) -> str:
+    """Refresh the access token using the stored refresh token via Gumloop OAuth."""
+    token_path, client_path = _get_token_paths(user_id)
+    if not os.path.exists(token_path):
+        raise FileNotFoundError("Token file not found for Salesforce MCP")
+
+    with open(token_path) as f:
+        tokens = json.load(f)
+
+    refresh_tok = tokens.get("refresh_token")
+    if not refresh_tok:
+        raise ValueError("No refresh_token in token file")
+
+    client_id = ""
+    if os.path.exists(client_path):
+        with open(client_path) as f:
+            client_id = json.load(f).get("client_id", "")
+
+    resp = requests.post(
+        _OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_tok,
+            "client_id": client_id,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        logger.warning("Salesforce token refresh failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+        return tokens["access_token"]
+
+    new_tokens = resp.json()
+    tokens["access_token"] = new_tokens["access_token"]
+    if "refresh_token" in new_tokens:
+        tokens["refresh_token"] = new_tokens["refresh_token"]
+    if "expires_in" in new_tokens:
+        tokens["expires_in"] = new_tokens["expires_in"]
+
+    with open(token_path, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+    logger.info("Salesforce token refreshed and saved for %s", user_id or "default")
+    return tokens["access_token"]
+
+
+def _load_glass_token() -> Optional[str]:
+    """Try to load a fresh Salesforce access token from Glass credentials."""
+    try:
+        if not _GLASS_CREDS.exists():
+            return None
+        import time as _time
+        with open(_GLASS_CREDS) as f:
+            creds = json.load(f)
+        mcp_oauth = creds.get("mcpOAuth", {})
+        for key, entry in mcp_oauth.items():
+            if key.startswith(_GLASS_SF_KEY):
+                expires_at = entry.get("expiresAt", 0)
+                if expires_at > _time.time() * 1000:
+                    return entry["accessToken"]
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def _load_access_token(user_id: Optional[str] = None) -> str:
-    """Load the current access token from the token cache."""
+    """Load the current access token, preferring Glass credentials."""
+    glass_token = _load_glass_token()
+    if glass_token:
+        return glass_token
+
     token_path, _ = _get_token_paths(user_id)
     if not os.path.exists(token_path):
         raise FileNotFoundError(f"Salesforce MCP token file not found: {token_path}")
@@ -73,7 +146,7 @@ def _load_access_token(user_id: Optional[str] = None) -> str:
     return tokens["access_token"]
 
 
-def _get_session(user_id: Optional[str] = None) -> Tuple[requests.Session, dict]:
+def _get_session(user_id: Optional[str] = None, _retried: bool = False) -> Tuple[requests.Session, dict]:
     """Return a cached, initialized MCP session for the given user.
 
     If no valid cached session exists (missing, expired, or token changed),
@@ -81,7 +154,7 @@ def _get_session(user_id: Optional[str] = None) -> Tuple[requests.Session, dict]
     and caches it.
 
     Returns (session, headers_dict) ready for tool calls.
-    On 401 during init, alerts the user and raises.
+    On 401 during init, attempts token refresh once before alerting.
     """
     cache_key = user_id or "default"
     token = _load_access_token(user_id=user_id)
@@ -123,9 +196,16 @@ def _get_session(user_id: Optional[str] = None) -> Tuple[requests.Session, dict]
         timeout=15,
     )
 
-    if init_resp.status_code == 401:
+    if init_resp.status_code == 401 and not _retried:
+        logger.warning("Gumstack Salesforce 401 on init — attempting token refresh...")
         _session_cache.pop(cache_key, None)
-        _alert_sf_auth_failure(user_id, "401 on init — re-auth at gumloop.com/personal/apps")
+        try:
+            _refresh_token(user_id=user_id)
+            return _get_session(user_id=user_id, _retried=True)
+        except Exception as e:
+            logger.warning("Salesforce token refresh failed: %s", e)
+    if init_resp.status_code == 401:
+        _alert_sf_auth_failure(user_id, "401 on init — token refresh failed")
         init_resp.raise_for_status()
     init_resp.raise_for_status()
 

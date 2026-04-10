@@ -32,7 +32,7 @@ _channel_ids_by_key = {}
 
 # Regex to extract Account Manager Slack user ID from alert messages.
 # Matches lines like "Account Manager: <@U06DAFU4YRG>"
-_AM_LINE_RE = re.compile(r"\*?Account Manager(?:\s*/\s*CSM)?:?\*?\s*<@(U[A-Z0-9]+)(?:\|[^>]*)?>")
+_AM_LINE_RE = re.compile(r"\*?(?:Account Manager(?:\s*/\s*CSM)?|Ramp POC\s*-\s*AM):?\*?\s*<@(U[A-Z0-9]+)(?:\|[^>]*)?>")
 
 
 
@@ -89,6 +89,37 @@ def resolve_channel_ids(client):
                         break
             except Exception:
                 pass
+
+        # For any channels not found via conversations_list, try direct lookup
+        # (conversations_list only returns channels the bot is a member of,
+        # and may lag after a recent /invite)
+        if needed - set(channels.keys()):
+            for name in list(needed - set(channels.keys())):
+                try:
+                    # Search public channels by name
+                    search_result = client.conversations_list(
+                        types="public_channel", limit=1, exclude_archived=True
+                    )
+                    # Try conversations_info with a known ID as fallback
+                except Exception:
+                    pass
+
+        # Hardcoded fallback IDs for channels that are hard to discover
+        _FALLBACK_IDS = {
+            "alerts-self-serve-procurement-trials": "C0ACLAX49QS",
+            "alerts-pclip-activations": "C06QCG5B0SE",
+            "alerts-fundraising": "C08G10ZV01G",
+            "alerts-rclip-requests": "C075LD63BCP",
+        }
+        for name, fallback_id in _FALLBACK_IDS.items():
+            if name in needed and name not in channels:
+                try:
+                    info = client.conversations_info(channel=fallback_id)
+                    if info.get("ok"):
+                        channels[name] = fallback_id
+                        logger.info("Resolved %s via fallback ID %s", name, fallback_id)
+                except Exception as e:
+                    logger.warning("Fallback lookup failed for %s: %s", name, e)
 
         mapping = {
             "ach_to_card": handle_ach_to_card_alert,

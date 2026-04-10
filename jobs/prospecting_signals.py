@@ -361,6 +361,13 @@ def gather_prospecting_signals(user_id: Optional[str] = None, force: bool = Fals
     except Exception as e:
         logger.warning("Failed to merge activation alerts: %s", e)
 
+    # Enrich with real Gmail sent dates
+    try:
+        from core.gmail_sent_tracker import enrich_with_gmail_sent
+        enrich_with_gmail_sent(results, user_id=user_id)
+    except Exception as e:
+        logger.debug("Prospecting: Gmail sent enrichment failed: %s", e)
+
     _prospect_cache[uid] = {"data": results, "fetched_at": time.time()}
     logger.info("Prospecting signals: %d results for %s", len(results), uid)
     return results

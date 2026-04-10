@@ -17,6 +17,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Track updated_at per meeting ID across polls to detect when transcript stops growing
+_meeting_updated_at: dict[str, float] = {}
+
 GRANOLA_DIR = Path.home() / "Library" / "Application Support" / "Granola"
 
 
@@ -190,22 +193,44 @@ def get_recent_meetings(minutes: int = 10, skip_end_check: bool = False) -> list
             continue
 
         # Skip meetings still in progress (unless caller said to skip this check).
-        # Priority 1: meeting_end_count >= 1 = Granola confirmed call ended (instant)
-        # Priority 2: calendar end time + 10 min buffer (covers meetings running over)
-        # Priority 3: updated_at > 15 min ago with no end signals = assume ended
+        # Two-signal approach: Granola's meeting_end_count fires when audio stops,
+        # PLUS we verify the transcript has stopped growing (updated_at unchanged
+        # for 2+ min). This prevents processing mid-call on brief audio drops.
         if not skip_end_check:
-            _CAL_END_BUFFER = 10 * 60  # 10 minutes after scheduled end
-            _STALE_BUFFER = 15 * 60    # 15 minutes since last update = assume ended
-            meeting_ended = doc.get("meeting_end_count", 0) >= 1
-            if not meeting_ended:
+            _TRANSCRIPT_COOLDOWN = 2 * 60   # 2 min of no transcript updates = truly ended
+            _CAL_OVERRUN_BUFFER = 10 * 60   # 10 min after cal end if no Granola signal
+            _STALE_BUFFER = 15 * 60         # 15 min since last update = assume ended
+
+            granola_ended = doc.get("meeting_end_count", 0) >= 1
+            doc_id = doc.get("id", "")
+
+            if granola_ended:
+                # Granola says call ended — verify transcript stopped growing
+                prev_ts = _meeting_updated_at.get(doc_id)
+                if prev_ts is not None and prev_ts == ts:
+                    # updated_at hasn't changed since last poll — transcript is stable
+                    meeting_ended = (now - ts) >= _TRANSCRIPT_COOLDOWN
+                else:
+                    # First time seeing this meeting or updated_at changed — record and wait
+                    _meeting_updated_at[doc_id] = ts
+                    meeting_ended = False
+            else:
+                # Granola hasn't signaled end — check calendar fallback
                 cal_event = doc.get("google_calendar_event", {})
                 cal_end = cal_event.get("end", {}).get("dateTime", "")
-                if cal_end:
-                    cal_end_ts = _parse_timestamp(cal_end)
-                    meeting_ended = cal_end_ts and (cal_end_ts + _CAL_END_BUFFER) <= now
+                cal_end_ts = _parse_timestamp(cal_end) if cal_end else None
+                if cal_end_ts:
+                    meeting_ended = (cal_end_ts + _CAL_OVERRUN_BUFFER) <= now
+                else:
+                    meeting_ended = False
+                # Track updated_at for when Granola does signal
+                _meeting_updated_at[doc_id] = ts
+
             if not meeting_ended:
                 # Fallback: if updated_at is >15 min old, meeting is almost certainly over
                 meeting_ended = (now - ts) > _STALE_BUFFER
+            if meeting_ended and doc_id in _meeting_updated_at:
+                del _meeting_updated_at[doc_id]  # cleanup
             if not meeting_ended:
                 logger.debug(
                     "Skipping meeting '%s' — still in progress "
@@ -259,17 +284,33 @@ def get_recent_meetings(minutes: int = 10, skip_end_check: bool = False) -> list
 
                 # Skip meetings still in progress (same logic as local cache)
                 if not skip_end_check:
-                    _CAL_END_BUFFER = 10 * 60
+                    _TRANSCRIPT_COOLDOWN = 2 * 60
+                    _CAL_OVERRUN_BUFFER = 10 * 60
                     _STALE_BUFFER = 15 * 60
-                    api_ended = doc.get("meeting_end_count", 0) >= 1
-                    if not api_ended:
+
+                    api_granola_ended = doc.get("meeting_end_count", 0) >= 1
+
+                    if api_granola_ended:
+                        prev_ts = _meeting_updated_at.get(doc_id)
+                        if prev_ts is not None and prev_ts == ts:
+                            api_ended = (now - ts) >= _TRANSCRIPT_COOLDOWN
+                        else:
+                            _meeting_updated_at[doc_id] = ts
+                            api_ended = False
+                    else:
                         cal_event = doc.get("google_calendar_event", {})
                         cal_end = cal_event.get("end", {}).get("dateTime", "")
-                        if cal_end:
-                            cal_end_ts = _parse_timestamp(cal_end)
-                            api_ended = cal_end_ts and (cal_end_ts + _CAL_END_BUFFER) <= now
+                        api_cal_end_ts = _parse_timestamp(cal_end) if cal_end else None
+                        if api_cal_end_ts:
+                            api_ended = (api_cal_end_ts + _CAL_OVERRUN_BUFFER) <= now
+                        else:
+                            api_ended = False
+                        _meeting_updated_at[doc_id] = ts
+
                     if not api_ended:
                         api_ended = (now - ts) > _STALE_BUFFER
+                    if api_ended:
+                        _meeting_updated_at.pop(doc_id, None)
                     if not api_ended:
                         logger.debug(
                             "Skipping API meeting '%s' — still in progress",

@@ -25,10 +25,13 @@ import requests
 logger = logging.getLogger(__name__)
 
 _MCP_URL = "https://mcp.gumloop.com/gmail/mcp"
+_OAUTH_TOKEN_URL = "https://api.gumloop.com/oauth/token"
 _SERVER_HASH = hashlib.md5(_MCP_URL.encode()).hexdigest()
 _TOKEN_DIR = Path.home() / ".mcp-auth" / "mcp-remote-0.1.12"
 _TOKEN_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_tokens.json"
 _CLIENT_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_client_info.json"
+_GLASS_CREDS = Path.home() / ".project-glass" / "credentials.json"
+_GLASS_GMAIL_KEY = "gumstack-gmail|"  # prefix in Glass mcpOAuth keys
 
 # Session cache: keyed by user_id (or "default") -> {"session": requests.Session, "initialized_at": float, "token": str}
 _session_cache: Dict[str, dict] = {}
@@ -82,18 +85,68 @@ def _get_token_paths(user_id: Optional[str] = None) -> Tuple[str, str]:
     return str(_TOKEN_FILE), str(_CLIENT_FILE)
 
 
+def _load_glass_token() -> Optional[str]:
+    """Try to load a fresh Gmail access token from Glass credentials.
+
+    Glass manages its own OAuth refresh cycle, so its token is usually fresh.
+    Returns the access token string, or None if unavailable/expired.
+    """
+    try:
+        if not _GLASS_CREDS.exists():
+            return None
+        with open(_GLASS_CREDS) as f:
+            creds = json.load(f)
+        mcp_oauth = creds.get("mcpOAuth", {})
+        for key, entry in mcp_oauth.items():
+            if key.startswith(_GLASS_GMAIL_KEY):
+                expires_at = entry.get("expiresAt", 0)
+                # expiresAt is in epoch milliseconds
+                if expires_at > time.time() * 1000:
+                    return entry["accessToken"]
+                else:
+                    logger.debug("Glass Gmail token expired (expiresAt=%s)", expires_at)
+                    return None
+        return None
+    except Exception as e:
+        logger.debug("Could not load Glass Gmail token: %s", e)
+        return None
+
+
 def _load_access_token(user_id: Optional[str] = None) -> str:
-    """Load the current access token from the token cache."""
+    """Load the current access token, preferring Glass credentials.
+
+    Priority: Glass credentials (always fresh) > per-user tokens > default mcp-remote.
+    If the mcp-remote token is close to expiry (< 5 min), proactively refresh it.
+    """
+    # Try Glass first (managed refresh, usually fresh)
+    glass_token = _load_glass_token()
+    if glass_token:
+        return glass_token
+
+    # Fall back to per-user or default token files
     token_path, _ = _get_token_paths(user_id)
     if not os.path.exists(token_path):
         raise FileNotFoundError(f"Gmail MCP token file not found: {token_path}")
     with open(token_path) as f:
         tokens = json.load(f)
+
+    # Proactive refresh: if token is near expiry, refresh now instead of failing later
+    expires_in = tokens.get("expires_in", 3600)
+    saved_at = os.path.getmtime(token_path)
+    age = time.time() - saved_at
+    remaining = expires_in - age
+    if remaining < 300:  # < 5 minutes left
+        logger.info("Gmail token near expiry (%.0fs left) — refreshing proactively", remaining)
+        try:
+            return _refresh_token(user_id=user_id)
+        except Exception as e:
+            logger.warning("Proactive Gmail token refresh failed: %s — using existing", e)
+
     return tokens["access_token"]
 
 
 def _refresh_token(user_id: Optional[str] = None) -> str:
-    """Refresh the access token using the stored refresh token and client info."""
+    """Refresh the access token using the stored refresh token via Gumloop OAuth."""
     token_path, client_path = _get_token_paths(user_id)
     if not os.path.exists(token_path) or not os.path.exists(client_path):
         raise FileNotFoundError("Token or client info file not found for Gmail MCP")
@@ -103,27 +156,38 @@ def _refresh_token(user_id: Optional[str] = None) -> str:
     with open(client_path) as f:
         client_info = json.load(f)
 
-    # Use the Gumstack OAuth token endpoint (derived from MCP server)
-    # mcp-remote uses the MCP server's own OAuth endpoints
+    refresh_tok = tokens.get("refresh_token")
+    if not refresh_tok:
+        raise ValueError("No refresh_token in token file")
+
+    # Standard OAuth2 refresh_token grant to Gumloop's token endpoint
     resp = requests.post(
-        f"{_MCP_URL}",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "gary-bot", "version": "1.0.0"},
-            },
+        _OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_tok,
+            "client_id": client_info.get("client_id", ""),
         },
-        headers={
-            "Authorization": f"Bearer {tokens['refresh_token']}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
     )
-    # If refresh fails, we'll just use the current token and hope it works
+    if resp.status_code != 200:
+        logger.warning("Gmail token refresh failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+        return tokens["access_token"]
+
+    new_tokens = resp.json()
+    # Merge new tokens into existing (preserve refresh_token if not rotated)
+    tokens["access_token"] = new_tokens["access_token"]
+    if "refresh_token" in new_tokens:
+        tokens["refresh_token"] = new_tokens["refresh_token"]
+    if "expires_in" in new_tokens:
+        tokens["expires_in"] = new_tokens["expires_in"]
+
+    # Persist to disk so the bot picks up fresh tokens on next load
+    with open(token_path, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+    logger.info("Gmail token refreshed and saved for %s", user_id or "default")
     return tokens["access_token"]
 
 
@@ -235,6 +299,8 @@ def _mcp_call(
 
     Uses a cached initialized session to avoid redundant initialize round-trips.
     On 401, clears the session cache and retries once with token refresh.
+    On empty/unparseable response, retries once with a fresh session (likely
+    transient Gumstack issue — they sometimes return SSE or empty bodies).
     """
     cache_key = user_id or "default"
     session, headers = _get_session(user_id=user_id)
@@ -250,7 +316,7 @@ def _mcp_call(
 
     # Auto-refresh on 401 for tool call (one retry only)
     if resp.status_code == 401 and not _retried:
-        logger.warning("Gumstack Gmail 401 on tool call — clearing session cache and retrying...")
+        logger.warning("Gumstack Gmail 401 on tool call — refreshing token and retrying...")
         _session_cache.pop(cache_key, None)
         try:
             _refresh_token(user_id=user_id)
@@ -260,7 +326,17 @@ def _mcp_call(
     if resp.status_code == 401:
         _alert_gmail_auth_failure(user_id, "401 on tool call — token refresh failed")
     resp.raise_for_status()
-    return _parse_response(resp)
+
+    parsed = _parse_response(resp)
+
+    # Retry once on empty/unparseable response (transient Gumstack SSE issue)
+    if not parsed and not _retried:
+        logger.debug("Gumstack Gmail returned empty response — retrying with fresh session...")
+        _session_cache.pop(cache_key, None)
+        time.sleep(0.5)
+        return _mcp_call(method, params, request_id, _retried=True, user_id=user_id)
+
+    return parsed
 
 
 # ── Label resolution ─────────────────────────────────────────────────────────
@@ -419,8 +495,10 @@ def create_draft(
             _alert_gmail_auth_failure(user_id, str(e)[:200])
     except Exception as e:
         logger.error("Gumstack Gmail draft creation failed: %s", e)
-        # "Expecting value" = non-JSON response, often an auth error page
-        if "Expecting value" in str(e) or "token" in str(e).lower():
+        # Only alert auth failure for clear token/auth errors, NOT transient parse errors.
+        # "Expecting value" is usually a transient Gumstack SSE issue, not a real auth problem.
+        err_str = str(e).lower()
+        if "token" in err_str or "unauthorized" in err_str or "forbidden" in err_str:
             _alert_gmail_auth_failure(user_id, str(e)[:200])
 
     return result
@@ -454,7 +532,17 @@ def read_emails(
             return []
 
         raw = json.loads(content[0].get("text", "[]"))
-        emails_list = raw if isinstance(raw, list) else raw.get("emails", raw.get("messages", []))
+        if isinstance(raw, list):
+            emails_list = raw
+        elif isinstance(raw, dict):
+            # Gumstack may return a single email dict (not wrapped in a list)
+            # or a dict with "emails"/"messages" key
+            emails_list = raw.get("emails", raw.get("messages", []))
+            if not emails_list and "id" in raw and "subject" in raw:
+                # Single email object — wrap it in a list
+                emails_list = [raw]
+        else:
+            emails_list = []
 
         results = []
         for em in emails_list:
@@ -479,9 +567,56 @@ def read_emails(
         return []
 
 
+def get_thread(
+    thread_id: str,
+    user_id: Optional[str] = None,
+) -> List[dict]:
+    """Get all messages in a Gmail thread, ordered chronologically.
+
+    Returns a list of message dicts with keys:
+        id, threadId, subject, from, to, cc, date, body, labelIds
+    """
+    try:
+        resp = _mcp_call(
+            "tools/call",
+            {
+                "name": "get_thread",
+                "arguments": {"thread_id": thread_id},
+            },
+            user_id=user_id,
+        )
+        content = resp.get("result", {}).get("content", [])
+        if not content:
+            return []
+
+        raw = json.loads(content[0].get("text", "{}"))
+        messages = raw.get("messages", []) if isinstance(raw, dict) else raw
+
+        results = []
+        for msg in messages:
+            results.append({
+                "id": msg.get("id", ""),
+                "threadId": msg.get("threadId", ""),
+                "subject": msg.get("subject", ""),
+                "from": msg.get("from", ""),
+                "to": msg.get("to", ""),
+                "cc": msg.get("cc", ""),
+                "date": msg.get("date", ""),
+                "body": msg.get("body", ""),
+                "labelIds": msg.get("labelIds", []),
+                "headers": msg.get("headers", {}),
+            })
+        return results
+
+    except Exception as e:
+        logger.warning("get_thread failed: %s", e)
+        return []
+
+
 def get_attachment(
     email_id: str,
     attachment_id: str,
+    filename: str = "attachment",
     user_id: Optional[str] = None,
 ) -> Optional[bytes]:
     """Download an email attachment via Gumstack MCP.
@@ -496,6 +631,7 @@ def get_attachment(
                 "arguments": {
                     "email_id": email_id,
                     "attachment_id": attachment_id,
+                    "filename": filename,
                 },
             },
             user_id=user_id,
@@ -613,6 +749,7 @@ def fetch_looker_zip(
         att_data = get_attachment(
             email_id=em["id"],
             attachment_id=zip_att.get("attachmentId", zip_att.get("id", "")),
+            filename=zip_att.get("filename", "attachment.zip"),
             user_id=user_id,
         )
         if not att_data:

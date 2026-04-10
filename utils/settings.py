@@ -33,6 +33,7 @@ DEFAULT_SETTINGS = {
     "signal_close_window": True,
     "signal_leading": True,
     "signal_first_bill": True,
+    "signal_opp_first_spend": True,
     "signal_treasury_spike": True,
 }
 

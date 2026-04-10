@@ -20,7 +20,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
+_lock = threading.Semaphore(4)  # Allow up to 4 concurrent snow CLI queries
 _SNOW_CLI = "/opt/homebrew/bin/snow"
 
 

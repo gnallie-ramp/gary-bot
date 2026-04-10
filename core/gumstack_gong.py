@@ -28,9 +28,12 @@ from core.user_registry import get_user_gong_tokens
 logger = logging.getLogger(__name__)
 
 _MCP_URL = "https://mcp.gumloop.com/gong/mcp"
+_OAUTH_TOKEN_URL = "https://api.gumloop.com/oauth/token"
 _SERVER_HASH = hashlib.md5(_MCP_URL.encode()).hexdigest()
 _TOKEN_DIR = Path.home() / ".mcp-auth" / "mcp-remote-0.1.12"
 _TOKEN_FILE = _TOKEN_DIR / f"{_SERVER_HASH}_tokens.json"
+_GLASS_CREDS = Path.home() / ".project-glass" / "credentials.json"
+_GLASS_GONG_KEY = "gumstack-gong|"
 
 # Session cache: keyed by user_id (or "default") -> {"session": requests.Session, "initialized_at": float, "token": str}
 _session_cache: Dict[str, dict] = {}
@@ -51,8 +54,87 @@ def _get_token_path(user_id: Optional[str] = None) -> str:
     return str(_TOKEN_FILE)
 
 
+def _get_client_info_path(user_id: Optional[str] = None) -> Optional[str]:
+    """Resolve the client_info file path for the given user."""
+    if user_id:
+        user_dir = Path.home() / ".gary_bot_tokens" / user_id
+        ci = user_dir / f"{_SERVER_HASH}_client_info.json"
+        if ci.exists():
+            return str(ci)
+    default = _TOKEN_DIR / f"{_SERVER_HASH}_client_info.json"
+    return str(default) if default.exists() else None
+
+
+def _refresh_token(user_id: Optional[str] = None) -> str:
+    """Refresh the access token using the stored refresh token via Gumloop OAuth."""
+    token_path = _get_token_path(user_id)
+    client_info_path = _get_client_info_path(user_id)
+
+    with open(token_path) as f:
+        tokens = json.load(f)
+
+    refresh_tok = tokens.get("refresh_token")
+    if not refresh_tok:
+        raise ValueError("No refresh_token in token file")
+
+    client_id = ""
+    if client_info_path and Path(client_info_path).exists():
+        with open(client_info_path) as f:
+            client_id = json.load(f).get("client_id", "")
+
+    resp = requests.post(
+        _OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_tok,
+            "client_id": client_id,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        logger.warning("Gong token refresh failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+        return tokens["access_token"]
+
+    new_tokens = resp.json()
+    tokens["access_token"] = new_tokens["access_token"]
+    if "refresh_token" in new_tokens:
+        tokens["refresh_token"] = new_tokens["refresh_token"]
+    if "expires_in" in new_tokens:
+        tokens["expires_in"] = new_tokens["expires_in"]
+
+    with open(token_path, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+    logger.info("Gong token refreshed and saved for %s", user_id or "default")
+    return tokens["access_token"]
+
+
+def _load_glass_token() -> Optional[str]:
+    """Try to load a fresh Gong access token from Glass credentials."""
+    try:
+        if not _GLASS_CREDS.exists():
+            return None
+        with open(_GLASS_CREDS) as f:
+            creds = json.load(f)
+        mcp_oauth = creds.get("mcpOAuth", {})
+        for key, entry in mcp_oauth.items():
+            if key.startswith(_GLASS_GONG_KEY):
+                expires_at = entry.get("expiresAt", 0)
+                if expires_at > time.time() * 1000:
+                    return entry["accessToken"]
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def _load_access_token(user_id: Optional[str] = None) -> str:
-    """Load the current access token from the token cache."""
+    """Load the current access token, preferring Glass credentials."""
+    glass_token = _load_glass_token()
+    if glass_token:
+        return glass_token
+
     token_path = _get_token_path(user_id)
     if not Path(token_path).exists():
         raise FileNotFoundError(f"Gong MCP token file not found: {token_path}")
@@ -111,31 +193,12 @@ def _get_session(user_id: Optional[str] = None, _retried: bool = False) -> Tuple
         timeout=15,
     )
 
-    # Handle 401 on init — clear cache and retry with refresh token
+    # Handle 401 on init — refresh token and retry once
     if init_resp.status_code == 401 and not _retried:
-        logger.warning("Gumstack Gong 401 on init — token may be expired")
+        logger.warning("Gumstack Gong 401 on init — attempting token refresh...")
         _session_cache.pop(cache_key, None)
         try:
-            token_path = _get_token_path(user_id)
-            with open(token_path) as f:
-                tokens = json.load(f)
-            requests.post(
-                _MCP_URL,
-                json={
-                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-11-25",
-                        "capabilities": {},
-                        "clientInfo": {"name": "gary-bot", "version": "1.0.0"},
-                    },
-                },
-                headers={
-                    "Authorization": f"Bearer {tokens.get('refresh_token', '')}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-                timeout=15,
-            )
+            _refresh_token(user_id=user_id)
             return _get_session(user_id=user_id, _retried=True)
         except Exception as e:
             logger.warning("Gong token refresh failed: %s", e)

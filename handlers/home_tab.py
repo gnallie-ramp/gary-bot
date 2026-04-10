@@ -215,6 +215,12 @@ def _build_dashboard_tab(client, user_id):
         })
         blocks.append({"type": "divider"})
 
+    # Activation Alerts (recent treasury, investment, first bill milestones)
+    activation_blocks = _get_activation_alerts_section(user_id)
+    if activation_blocks:
+        blocks.extend(activation_blocks)
+        blocks.append({"type": "divider"})
+
     # Quick Actions
     blocks.append({
         "type": "section",
@@ -313,7 +319,7 @@ def _build_stale_tab(client, user_id):
     blocks.append({
         "type": "context",
         "elements": [{"type": "mrkdwn", "text": (
-            "Opps with no meeting or email activity in 21+ days. "
+            "Opps with no meeting or email activity in 15+ days. "
             "Sorted by estimated CP value. Draft an email to get them back on the calendar."
         )}],
     })
@@ -362,6 +368,7 @@ def _build_stale_tab(client, user_id):
         stage = item.get("stage", "")
         days_stale = item.get("days_since_touch", 0)
         est_cp = item.get("est_cp", 0)
+        expansion_amount = item.get("expansion_amount", 0)
         baseline = item.get("_baseline", 0)
         recent = item.get("_recent", 0)
         call_summary = item.get("_call_summary", "")
@@ -369,8 +376,10 @@ def _build_stale_tab(client, user_id):
         last_call_date = item.get("_last_call_date", "")
         last_email_subj = item.get("_last_email_subj", "")
         last_email_date = item.get("last_email_date", "")
+        last_email_direction = item.get("_last_email_direction", "")
         product_requests = item.get("_product_requests", "")
         competitors = item.get("_competitors", "")
+        contacts = item.get("_contacts", [])
         activation_status = item.get("activation_status", "") if "activation_status" in item else ""
 
         # SFDC link
@@ -380,48 +389,128 @@ def _build_stale_tab(client, user_id):
         # Build card text
         lines = [f"*{acct_str}*  —  {product}"]
 
-        # Stage + staleness + CP line
+        # Stage + staleness + amount + CP line
         meta = f"{stage} · {days_stale}d stale"
+        if expansion_amount > 0:
+            meta += f" · {_fmt_currency(expansion_amount)}/mo"
         if est_cp > 0:
             meta += f" · ~{_fmt_currency(est_cp)} CP"
         lines.append(meta)
 
-        # Activation + spend
-        if activation_status:
-            _STATUS_ICONS = {
-                "No spend yet": "\u26aa",
-                "Very low": "\U0001f7e4",
-                "Below baseline": "\U0001f7e1",
-                "Near baseline": "\U0001f7e2",
-                "Exceeding baseline": "\U0001f534",
-            }
-            icon = _STATUS_ICONS.get(activation_status, "")
-            lines.append(f"{icon} {activation_status} — Baseline: {_fmt_currency(baseline)} | L30D: {_fmt_currency(recent)}")
+        # Key contacts
+        if contacts:
+            contact_parts = []
+            for c in contacts[:2]:
+                name = c.get("name", "")
+                title = c.get("title", "")
+                if title:
+                    contact_parts.append(f"{name} ({title})")
+                else:
+                    contact_parts.append(name)
+            lines.append(f":bust_in_silhouette: {', '.join(contact_parts)}")
 
-        # Last call context
+        # ── Spend activity context (natural language) ──
+        _STATUS_ICONS = {
+            "No spend yet": "\u26aa", "Very low": "\U0001f7e4",
+            "Below baseline": "\U0001f7e1", "Near baseline": "\U0001f7e2",
+            "Exceeding baseline": "\U0001f534",
+        }
+        if activation_status:
+            icon = _STATUS_ICONS.get(activation_status, "")
+            if activation_status == "No spend yet":
+                spend_ctx = f"{icon} *No {product.lower()} spend since opp created.* Baseline: {_fmt_currency(baseline)}"
+            elif activation_status == "Very low":
+                spend_ctx = f"{icon} *Minimal activity* — spending {_fmt_currency(recent)}/mo vs {_fmt_currency(baseline)} baseline (pre-opp)"
+            elif activation_status == "Below baseline":
+                spend_ctx = f"{icon} *Below baseline* — {_fmt_currency(recent)}/mo vs {_fmt_currency(baseline)} baseline. Usage hasn't ramped yet."
+            elif activation_status == "Near baseline":
+                spend_ctx = f"{icon} *Near baseline* — {_fmt_currency(recent)}/mo vs {_fmt_currency(baseline)}. Usage is steady but hasn't grown."
+            elif activation_status == "Exceeding baseline":
+                delta = recent - baseline
+                spend_ctx = f"{icon} *Spend exceeding baseline by {_fmt_currency(delta)}/mo* — {_fmt_currency(recent)} vs {_fmt_currency(baseline)}. *Close ASAP to capture CP.*"
+            else:
+                spend_ctx = f"Baseline: {_fmt_currency(baseline)} | L30D: {_fmt_currency(recent)}"
+            lines.append(spend_ctx)
+
+        # ── Last meeting context ──
         if last_call_name and last_call_date:
-            lines.append(f":telephone_receiver: Last call: _{last_call_name}_ ({last_call_date})")
+            lines.append(f":telephone_receiver: Last meeting: _{last_call_name}_ ({last_call_date})")
             if call_summary:
-                summary_short = call_summary[:150] + "..." if len(call_summary) > 150 else call_summary
+                summary_short = call_summary[:200] + "..." if len(call_summary) > 200 else call_summary
                 lines.append(f"   _{summary_short}_")
 
-        # Last email
+        # ── Email comms status (natural language) ──
         if last_email_subj and last_email_date and last_email_date != "2000-01-01":
-            subj_short = last_email_subj[:40] + "..." if len(last_email_subj) > 40 else last_email_subj
-            lines.append(f":email: Last email: \"{subj_short}\" ({last_email_date})")
+            subj_short = last_email_subj[:50] + "..." if len(last_email_subj) > 50 else last_email_subj
+            if last_email_direction == "outbound":
+                lines.append(f":email: Last outreach: \"{subj_short}\" ({last_email_date}) — _no reply yet_")
+            elif last_email_direction == "inbound":
+                lines.append(f":email: They replied: \"{subj_short}\" ({last_email_date}) — _needs follow-up_")
+            else:
+                lines.append(f":email: Last email: \"{subj_short}\" ({last_email_date})")
+        elif days_stale > 30:
+            lines.append(":email: _No email history found — cold outreach needed_")
 
-        # Competitors / product requests
+        # ── Competitors / product requests ──
         if competitors:
             lines.append(f":crossed_swords: Competitors: {competitors}")
         if product_requests:
-            req_short = product_requests[:80] + "..." if len(product_requests) > 80 else product_requests
+            req_short = product_requests[:100] + "..." if len(product_requests) > 100 else product_requests
             lines.append(f":bulb: Asked about: {req_short}")
 
-        # Urgency callout
+        # ── Draft preview: what happens when you click Draft ──
+        lines.append("")  # spacer
+
+        # Thread / recipient preview
+        primary_contact = contacts[0] if contacts else None
+        primary_name = primary_contact["name"] if primary_contact else ""
+        primary_title = f" ({primary_contact['title']})" if primary_contact and primary_contact.get("title") else ""
+
+        if last_email_subj and last_email_date and last_email_date != "2000-01-01":
+            subj_preview = last_email_subj[:45] + "..." if len(last_email_subj) > 45 else last_email_subj
+            if primary_name:
+                lines.append(f":outbox_tray: *Draft will:* Reply to \"_{subj_preview}_\" → {primary_name}{primary_title}")
+            else:
+                lines.append(f":outbox_tray: *Draft will:* Reply to \"_{subj_preview}_\"")
+        else:
+            if primary_name:
+                lines.append(f":outbox_tray: *Draft will:* Start new thread → {primary_name}{primary_title}")
+            else:
+                lines.append(":outbox_tray: *Draft will:* Start new thread (contact TBD from SFDC)")
+        if contacts and len(contacts) > 1:
+            cc_name = contacts[1]["name"]
+            cc_title = f" ({contacts[1]['title']})" if contacts[1].get("title") else ""
+            lines.append(f"   CC: {cc_name}{cc_title}")
+
+        # Email content preview — what the email will say
+        email_preview_parts = []
+        if call_summary and last_call_name:
+            # Summarize last meeting context for the preview
+            summary_snippet = call_summary[:120].rstrip()
+            if len(call_summary) > 120:
+                # Cut at last space
+                summary_snippet = summary_snippet[:summary_snippet.rfind(" ")] if " " in summary_snippet else summary_snippet
+            email_preview_parts.append(f"Reference your last call (_{last_call_name}_)")
+            if product_requests:
+                req_short = product_requests[:80]
+                if len(product_requests) > 80:
+                    req_short = req_short[:req_short.rfind(" ")] if " " in req_short else req_short
+                email_preview_parts.append(f"mention their interest in: {req_short}")
+        elif last_email_subj and last_email_direction == "outbound":
+            email_preview_parts.append("follow up on your last outreach")
+        elif last_email_subj and last_email_direction == "inbound":
+            email_preview_parts.append("respond to their last reply")
+
+        # Objective
         if activation_status == "Exceeding baseline":
-            lines.append("*:rotating_light: Spend above baseline — close ASAP to capture CP*")
+            email_preview_parts.append("push to close — spend already above baseline")
         elif activation_status == "No spend yet":
-            lines.append("_No activation yet — re-engage or push close date_")
+            email_preview_parts.append("drive first activation and get on a call")
+        else:
+            email_preview_parts.append("get back on the calendar to push the deal forward")
+
+        if email_preview_parts:
+            lines.append(f":pencil: *Email will:* {' → '.join(email_preview_parts)}")
 
         card_text = "\n".join(lines)
         # Slack text block limit: 3000 chars
@@ -440,12 +529,24 @@ def _build_stale_tab(client, user_id):
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": card_text},
-            "accessory": {
-                "type": "button",
-                "text": {"type": "plain_text", "text": ":envelope: Draft", "emoji": True},
-                "action_id": f"draft_outreach_stale_{_stale_btn_counter[0]}",
-                "value": payload,
-            },
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":envelope: Draft", "emoji": True},
+                    "action_id": f"draft_outreach_stale_{_stale_btn_counter[0]}",
+                    "value": payload,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":zzz: Snooze 7d", "emoji": True},
+                    "action_id": f"snooze_stale_{_stale_btn_counter[0]}",
+                    "value": json.dumps({"opp_id": opp_id, "account": acct_name, "days": 7}),
+                },
+            ],
         })
 
         # Divider between cards (skip after last)
@@ -597,8 +698,24 @@ def _build_prospecting_tab(client, user_id):
             lines.append(f"_{signal_detail}_")
 
         # Spend context — signal-specific to show relevant metrics
+        _ACTIVATION_KEYS = {"new_treasury", "new_investment", "first_bill"}
         spend_parts = []
-        if signal_key == "erp_no_billpay":
+        if signal_key in _ACTIVATION_KEYS:
+            # Activation signals: show balances and milestone-specific data
+            treasury_bal = item.get("treasury_balance", 0) or 0
+            inv_bal = item.get("investment_balance", 0) or 0
+            gla = item.get("current_gla", 0) or 0
+            if signal_key == "new_treasury" and treasury_bal > 0:
+                spend_parts.append(f"Treasury balance: ${treasury_bal:,.0f}")
+            if signal_key == "new_investment" and inv_bal > 0:
+                spend_parts.append(f"Investment balance: ${inv_bal:,.0f}")
+            if card_l30d > 0:
+                spend_parts.append(f"Card L30D: ${card_l30d:,.0f}")
+            if bp_l30d > 0:
+                spend_parts.append(f"BP L30D: ${bp_l30d:,.0f}")
+            if gla > 0:
+                spend_parts.append(f"GLA: ${gla:,.0f}")
+        elif signal_key == "erp_no_billpay":
             # Show competitor/off-ramp BP spend (not Ramp BP — that contradicts "no bill pay")
             if off_ramp_bp > 0:
                 bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
@@ -622,28 +739,36 @@ def _build_prospecting_tab(client, user_id):
             if bp_l30d > 0:
                 spend_parts.append(f"BP L30D: ${bp_l30d:,.0f}")
         if spend_parts:
-            lines.append(" · ".join(spend_parts))
+            lines.append(" \u00b7 ".join(spend_parts))
 
-        # AE estimates + off-ramp BP (shown on all signals for context)
-        est_parts = []
-        if ae_est_card > 0:
-            est_parts.append(f"AE Est Card: ${ae_est_card:,.0f}/mo")
-        if ae_est_bp > 0:
-            est_parts.append(f"AE Est BP: ${ae_est_bp:,.0f}/mo")
-        # Show off-ramp BP on signals that don't already show it above
-        if off_ramp_bp > 0 and signal_key not in ("erp_no_billpay", "high_competitor_spend"):
-            bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
-            est_parts.append(f"Off-Ramp BP: ${off_ramp_bp:,.0f}/mo{bp_comp_label}")
-        if est_parts:
-            lines.append(" · ".join(est_parts))
+        # AE estimates + off-ramp BP (skip for activation signals — they show their own context above)
+        if signal_key not in _ACTIVATION_KEYS:
+            est_parts = []
+            if ae_est_card > 0:
+                est_parts.append(f"AE Est Card: ${ae_est_card:,.0f}/mo")
+            if ae_est_bp > 0:
+                est_parts.append(f"AE Est BP: ${ae_est_bp:,.0f}/mo")
+            # Show off-ramp BP on signals that don't already show it above
+            if off_ramp_bp > 0 and signal_key not in ("erp_no_billpay", "high_competitor_spend"):
+                bp_comp_label = f" ({bp_competitor_name})" if bp_competitor_name else ""
+                est_parts.append(f"Off-Ramp BP: ${off_ramp_bp:,.0f}/mo{bp_comp_label}")
+            if est_parts:
+                lines.append(" \u00b7 ".join(est_parts))
 
         # Plus status + touch + opp status
         plus_status = item.get("plus_status", "")
         plus_label = plus_status.title() if plus_status else "No Plus"
-        status_parts = [f"Plus: {plus_label}", f"{days}d since last touch"]
+        status_parts = [f"Plus: {plus_label}"]
+        if signal_key in _ACTIVATION_KEYS:
+            # For activations, "days since touch" is 0 (just activated) — show champion instead
+            champion = item.get("champion_name", "")
+            if champion:
+                status_parts.append(f"Champion: {champion}")
+        else:
+            status_parts.append(f"{days}d since last touch")
         if has_opp:
             status_parts.append("has open opp")
-        lines.append(" · ".join(status_parts))
+        lines.append(" \u00b7 ".join(status_parts))
 
         card_text = "\n".join(lines)
         if len(card_text) > 2900:
@@ -1275,6 +1400,8 @@ def _get_quota_snapshot(user_id=None):
             "text": {"type": "mrkdwn", "text": f"*:chart_with_upwards_trend: Quota Snapshot — {month_short}{elapsed_str}*"},
         })
 
+        has_data = any([realized_line, renewal_line, sql_line, cw_line])
+
         if realized_line:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": realized_line}})
         if renewal_line:
@@ -1283,6 +1410,13 @@ def _get_quota_snapshot(user_id=None):
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": sql_line}})
         if cw_line:
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": cw_line}})
+
+        if not has_data:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
+                "_Looker data not available — "
+                "run `Full Quota Report` to refresh, or check "
+                "<https://ramp.looker.com/dashboards/6865|Looker> directly_"
+            )}]})
 
         # Full Report button
         blocks.append({
@@ -1336,6 +1470,26 @@ def _get_priority_alerts(user_id, max_per_group=5, max_groups=8):
             if df.empty:
                 _priority_cache[user_id] = {"data": None, "fetched_at": now}
                 return None
+
+            # Enrich with real Gmail sent dates (runs in background threads)
+            try:
+                from core.gmail_sent_tracker import enrich_with_gmail_sent
+                rows_as_dicts = df.to_dict("records")
+                enrich_with_gmail_sent(
+                    rows_as_dicts,
+                    account_name_key="account_name",
+                    account_id_key="account_id",
+                    user_id=user_id,
+                )
+                # Write enriched dates back into the dataframe
+                import pandas as pd
+                enriched_df = pd.DataFrame(rows_as_dicts)
+                # Only update columns that exist or were added
+                for col in ["last_email_date", "last_email_subject", "_email_source"]:
+                    if col in enriched_df.columns:
+                        df[col] = enriched_df[col]
+            except Exception as e:
+                logger.debug("Gmail sent enrichment failed for priority alerts: %s", e)
 
             _priority_cache[user_id] = {"data": df, "fetched_at": now}
             cached_df = df
@@ -1433,7 +1587,8 @@ def _render_priority_blocks(df, max_per_group, max_groups):
             "category": {
                 "early_accel": "prospect", "close_window": "close_window",
                 "leading": "prospect", "first_bill": "zero_to_one",
-                "close_now": "close_now", "zero_to_one": "zero_to_one",
+                "close_now": "close_now", "opp_first_spend": "zero_to_one",
+                "zero_to_one": "zero_to_one",
                 "sustained_accel": "prospect", "treasury_spike": "treasury_spike",
             }.get(signal_type, "prospect"),
         })
@@ -1571,11 +1726,29 @@ def _render_priority_blocks(df, max_per_group, max_groups):
             f"{_touch_line(row)}"
         )
 
+    def _fmt_opp_first_spend(row):
+        product = str(row.get("product", "")).replace(" Expansion", "")
+        spend_since = _safe_int(row.get("spend_since_opp", 0))
+        spend_7 = _safe_int(row.get("spend_l7d", 0))
+        spend_30 = _safe_int(row.get("spend_l30d", 0))
+        cp = _safe_int(row.get("est_cp", 0))
+        cp_str = f" · ~${cp:,} CP" if cp > 0 else ""
+        spend_detail = f"L7D ${spend_7:,}"
+        if spend_since > 0:
+            spend_detail += f" ({format_currency(spend_since)} since opp)"
+        return (
+            f"• {_acct_link(row)} — {product} *first spend detected*"
+            f"\n   {spend_detail}{cp_str}"
+            f"\n   _Close now while baseline is near $0 — every day of spend raises it_"
+            f"{_presale_line(row)}{_touch_line(row)}"
+        )
+
     _add_group("early_accel", ":zap: *Early Acceleration — Act Now*", groups.get("early_accel", []), _fmt_early)
     _add_group("close_window", ":alarm_clock: *Close Window — Opp Ramping*", groups.get("close_window", []), _fmt_close_window)
     _add_group("leading", ":eyes: *Leading Indicator — Spend Incoming*", groups.get("leading", []), _fmt_leading)
     _add_group("first_bill", ":tada: *First Bill Created — Bill Pay Opp Active*", groups.get("first_bill", []), _fmt_first_bill)
     _add_group("close_now", ":money_with_wings: *Close ASAP — Spend Exceeding Baseline*", groups.get("close_now", []), _fmt_close_now)
+    _add_group("opp_first_spend", ":bulb: *First Spend Detected — New Activation*", groups.get("opp_first_spend", []), _fmt_opp_first_spend)
     _add_group("zero_to_one", ":rocket: *Zero-to-One Activated Since Opp Created*", groups.get("zero_to_one", []), _fmt_zero_to_one)
     _add_group("sustained_accel", ":chart_with_upwards_trend: *Sustained Acceleration — No Open Opp*", groups.get("sustained_accel", []), _fmt_sustained)
     _add_group("treasury_spike", ":moneybag: *Treasury GLA Spike — Large Deposit*", groups.get("treasury_spike", []), _fmt_treasury_spike)
@@ -1584,6 +1757,99 @@ def _render_priority_blocks(df, max_per_group, max_groups):
         return None
 
     return blocks
+
+
+def _get_activation_alerts_section(user_id: str = None):
+    """Pull recent activation alerts (treasury, investment, first bill) for the Dashboard tab.
+
+    Shows the same rich data as the DM alerts: activation type, balance, and spend context.
+    Returns a list of Slack blocks or None if no activations.
+    """
+    try:
+        from jobs.activation_alerts import detect_activations, ACTIVATION_SIGNAL_META
+        from jobs.prospecting_signals import get_cached_prospects
+
+        # Pull activations from the prospecting cache first (avoids extra query),
+        # fall back to detect_activations() if cache is empty.
+        activation_keys = {"new_treasury", "new_investment", "first_bill"}
+        items = [
+            p for p in (get_cached_prospects(user_id=user_id) or [])
+            if p.get("signal_key") in activation_keys
+        ]
+        if not items:
+            items = detect_activations(user_id=user_id)
+        if not items:
+            return None
+
+        blocks = [{
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*:rotating_light: New Activation Alerts*"},
+        }, {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": (
+                f"{len(items)} account{'s' if len(items) != 1 else ''} "
+                "just hit a product milestone"
+            )}],
+        }]
+
+        _act_btn_counter = [0]
+
+        for item in items[:8]:
+            _act_btn_counter[0] += 1
+            meta = ACTIVATION_SIGNAL_META.get(item.get("signal_key"), {})
+            emoji = meta.get("emoji", ":bell:")
+            signal_key = item.get("signal_key", "")
+            acct = item.get("account", "Unknown")
+            acct_id = item.get("account_id", "")
+            sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+            acct_str = f"<{sf_link}|{acct}>" if sf_link else acct
+
+            detail = item.get("signal_detail", "")
+
+            # Spend context — mirror the DM format
+            spend_parts = []
+            card = item.get("card_spend_l30d", 0) or 0
+            bp = item.get("billpay_spend_l30d", 0) or 0
+            gla = item.get("current_gla", 0) or 0
+            treasury_bal = item.get("treasury_balance", 0) or 0
+            inv_bal = item.get("investment_balance", 0) or 0
+            if card > 0:
+                spend_parts.append(f"Card L30D: ${card:,.0f}")
+            if bp > 0:
+                spend_parts.append(f"BP L30D: ${bp:,.0f}")
+            if gla > 0:
+                spend_parts.append(f"GLA: ${gla:,.0f}")
+            spend_str = " \u00b7 ".join(spend_parts) if spend_parts else ""
+
+            text = f"{emoji} *{acct_str}*\n{detail}"
+            if spend_str:
+                text += f"\n{spend_str}"
+
+            # Draft button payload — reuses the prospecting drafter categories
+            # which already have the right AM intro + activation context tones
+            payload = json.dumps({
+                "account": acct,
+                "account_id": acct_id,
+                "product": "",
+                "category": f"prospect_{signal_key}",
+            })
+
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":envelope: Draft", "emoji": True},
+                    "action_id": f"draft_outreach_activation_{_act_btn_counter[0]}",
+                    "value": payload,
+                },
+            })
+
+        return blocks
+
+    except Exception as e:
+        logger.debug("Activation alerts section failed: %s", e)
+        return None
 
 
 def _get_non_spend_signals(user_id: str = None):
@@ -1639,6 +1905,44 @@ def _get_non_spend_signals(user_id: str = None):
                     "type": "context",
                     "elements": [{"type": "mrkdwn", "text": f"_...and {len(items) - 3} more — use `/{COMMAND_PREFIX}-priorities` for full list_"}],
                 })
+
+        # ── Missing Opps (Zero-to-One) ──
+        try:
+            from jobs.zero_to_one import get_missing_opps, _build_create_opp_url
+            missing = get_missing_opps(user_id=user_id)
+            if missing:
+                has_content = True
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": ":warning: *Missing Opps — Activation, No Open Opp*"},
+                })
+                for item in missing[:5]:
+                    acct_name = item.get("account_name", "Unknown")
+                    acct_id = item.get("account_id", "")
+                    product = str(item.get("product", "")).replace(" Expansion", "")
+                    l30d = item.get("l30d_spend", "$0")
+                    activated = item.get("activated_at", "")
+
+                    sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+                    acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+                    create_url = _build_create_opp_url(acct_id, product) if acct_id else ""
+
+                    line = f"\u2022 {acct_str} — {product}"
+                    line += f"\n   L30D: {l30d} · _Create + close now. CP = growth above {l30d} over 90 days._"
+                    if create_url:
+                        line += f"\n   <{create_url}|Create Opp>"
+
+                    blocks.append({
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": line},
+                    })
+                if len(missing) > 5:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"_...and {len(missing) - 5} more — run `zero-to-one` for full list_"}],
+                    })
+        except Exception as e:
+            logger.debug("Missing opps for pipeline tab failed: %s", e)
 
         if not has_content:
             return None
@@ -1806,6 +2110,7 @@ def _get_settings_blocks(user_id=None):
             ("signal_close_window", ":alarm_clock: Close Window"),
             ("signal_leading", ":eyes: Leading"),
             ("signal_first_bill", ":tada: First Bill"),
+            ("signal_opp_first_spend", ":bulb: First Spend"),
             ("signal_treasury_spike", ":moneybag: Treasury"),
         ]
         drafting_keys = [
@@ -1981,6 +2286,45 @@ def register_home_tab_actions(app):
                 logger.error("Stale sort toggle failed: %s", e)
 
         threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Stale tab: snooze button ─────────────────────────────────────────
+    @app.action({"action_id": re.compile(r"^snooze_stale_")})
+    def handle_snooze_stale(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        try:
+            payload = json.loads(action.get("value", "{}"))
+            opp_id = payload.get("opp_id", "")
+            account_name = payload.get("account", "")
+            days = payload.get("days", 7)
+
+            from utils.snooze import snooze_opp
+            snooze_opp(opp_id, days=days, user_id=user_id)
+
+            # Clear the stale opps cache so the tab refreshes without this opp
+            from jobs.priority_actions import _cached_actions
+            uid = user_id or "default"
+            if uid in _cached_actions and "stale" in _cached_actions[uid]:
+                del _cached_actions[uid]["stale"]
+
+            # Refresh home tab
+            def _refresh():
+                try:
+                    blocks = _build_home_blocks(client, user_id)
+                    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+                except Exception as e:
+                    logger.error("Snooze refresh failed: %s", e)
+
+            threading.Thread(target=_refresh, daemon=True).start()
+
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":zzz: Snoozed *{account_name}* for {days} days. It will reappear in the Stale Opps tab after that.",
+            )
+        except Exception as e:
+            logger.error("Snooze handler failed: %s", e)
 
     # ── Prospecting tab: filter buttons ──────────────────────────────────
     @app.action({"action_id": re.compile(r"^prospect_filter_")})

@@ -226,6 +226,20 @@ def _gather_alert_signals(user_id: str = None) -> list[dict]:
                     detail_lines[0] += f" · {cp_str}"
                 priority = 88  # High — treasury is uncapped H1-26
 
+            elif signal_type == "opp_first_spend":
+                spend_since = _safe_int(row.get("spend_since_opp", 0))
+                icon = "\U0001f4a1"  # lightbulb
+                action = f"First spend detected — {format_currency(l7d)} L7D"
+                detail_lines = [
+                    f"Open opp with zero prior spend — now {format_currency(l7d)} in L7D",
+                    f"_Product just activated — close now while baseline is near $0 to maximize CP_",
+                ]
+                if spend_since > 0:
+                    detail_lines[0] += f" ({format_currency(spend_since)} since opp)"
+                if cp_str:
+                    detail_lines[0] += f" · {cp_str}"
+                priority = 82  # Between close_now (85) and leading (80)
+
             else:
                 continue
 
@@ -523,6 +537,7 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
             last_call_date = str(row.get("last_call_date", "") or "")
             last_email_date = str(row.get("last_email_date", "") or "")
             last_email_subj = row.get("last_email_subject", "") or ""
+            last_email_direction = str(row.get("last_email_direction", "") or "").lower()
             call_summary = str(row.get("last_call_section_text", "") or "")
             product_requests = str(row.get("last_call_product_requests", "") or "")
             competitors = str(row.get("last_call_competitors", "") or "")
@@ -571,6 +586,8 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
 
             detail_lines.append("_Get them back on the calendar._")
 
+            expansion_amount = _safe_float(row.get("monthly_expansion_amount"))
+
             items.append({
                 "type": "stale",
                 "icon": "\u23f0",
@@ -582,6 +599,7 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
                 "action": f"Re-engage — {stage}, {days_since}d silent",
                 "detail": "\n      ".join(detail_lines),
                 "est_cp": est_cp,
+                "expansion_amount": expansion_amount,
                 "stage": stage,
                 "days_since_touch": days_since,
                 "_call_summary": call_summary[:500] if call_summary else "",
@@ -590,14 +608,55 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
                 "_last_call_name": last_call_name,
                 "_last_call_date": last_call_date,
                 "_last_email_subj": last_email_subj,
+                "_last_email_direction": last_email_direction,
                 "_baseline": baseline,
                 "_recent": recent,
+                "activation_status": activation_status,
                 "last_call_date": last_call_date,
                 "last_email_date": last_email_date,
             })
 
         items.sort(key=lambda x: -x["priority"])
-        return items[:MAX_PER_CATEGORY]
+
+        # Filter out snoozed opps
+        try:
+            from utils.snooze import is_snoozed
+            items = [it for it in items if not is_snoozed(it.get("opp_id", ""))]
+        except Exception:
+            pass
+
+        items = items[:MAX_PER_CATEGORY]
+
+        # Batch-fetch contacts for all stale opp accounts
+        try:
+            from utils.account_resolver import fetch_contact_emails
+            acct_ids = list({it["account_id"] for it in items if it.get("account_id")})
+            if acct_ids:
+                contacts_by_acct = fetch_contact_emails(None, acct_ids)
+                for it in items:
+                    acct_contacts = contacts_by_acct.get(it["account_id"], [])
+                    # Keep top 2 contacts with titles
+                    top = []
+                    for c in acct_contacts[:5]:
+                        name = c.get("name", "")
+                        title = c.get("title", "")
+                        email = c.get("email", "")
+                        if name and email:
+                            top.append({"name": name, "title": title, "email": email})
+                        if len(top) >= 2:
+                            break
+                    it["_contacts"] = top
+        except Exception as e:
+            logger.debug("Stale opps: contact fetch failed: %s", e)
+
+        # Enrich with real Gmail sent dates
+        try:
+            from core.gmail_sent_tracker import enrich_with_gmail_sent
+            enrich_with_gmail_sent(items, user_id=user_id)
+        except Exception as e:
+            logger.debug("Stale opps: Gmail sent enrichment failed: %s", e)
+
+        return items
 
     except Exception as e:
         logger.warning("Priority actions: stale opps failed: %s", e)
@@ -842,6 +901,10 @@ def _build_summary_blocks(date_str: str, groups: dict[str, list[dict]]) -> list[
                  "Open bill pay opps where customer just created their first bill.",
                  "priority_show_first_bill", "primary")
 
+    _add_summary("opp_first_spend", "\U0001f4a1", "first spend detected — new activation",
+                 "Open opp went from $0 to first spend. Close now while baseline is near $0.",
+                 "priority_show_opp_first_spend", "danger")
+
     _add_summary("zero_to_one", "\u26a1", "zero-to-one activations",
                  "Product activated — close early to lock in low baseline.",
                  "priority_show_zero_to_one", "primary")
@@ -1027,6 +1090,7 @@ def build_category_detail_blocks(category: str, user_id: str = None) -> list[dic
         "close_now": ("\U0001f534", "Close Now — Above Baseline"),
         "leading": ("\U0001f440", "Leading Indicators — Spend Incoming"),
         "first_bill": ("\U0001f389", "First Bill Created"),
+        "opp_first_spend": ("\U0001f4a1", "First Spend Detected — New Activation"),
         "zero_to_one": ("\u26a1", "Zero-to-One Activations"),
         "sustained_accel": ("\U0001f4c8", "Sustained Acceleration"),
         "treasury_spike": ("\U0001f4b0", "Treasury GLA Spike"),
@@ -1301,6 +1365,16 @@ def run_priority_actions(client, user_id=None, force: bool = False, silent: bool
         if multi_items:
             multi_items.sort(key=lambda x: -x["priority"])
             groups["multi_product"] = multi_items[:MAX_PER_CATEGORY]
+
+        # Enrich all grouped items with real Gmail sent dates
+        try:
+            from core.gmail_sent_tracker import enrich_with_gmail_sent
+            # Stale opps are already enriched in _gather_stale_opps; enrich the rest
+            for cat, cat_items in groups.items():
+                if cat != "stale" and cat_items:
+                    enrich_with_gmail_sent(cat_items, user_id=dm_target)
+        except Exception as e:
+            logger.debug("Gmail sent enrichment failed for priority actions: %s", e)
 
         _cached_actions[dm_target] = groups
         _cache_ts[dm_target] = time.time()

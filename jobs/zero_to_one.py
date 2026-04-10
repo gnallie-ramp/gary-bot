@@ -22,6 +22,19 @@ from utils.dedup import tracker
 
 logger = logging.getLogger(__name__)
 
+# Cache for missing opps — used by the Pipeline tab
+_missing_opp_cache: dict = {}  # user_id -> {"data": [...], "fetched_at": float}
+
+
+def get_missing_opps(user_id=None):
+    """Return cached missing opp items for the Pipeline tab."""
+    uid = user_id or "default"
+    entry = _missing_opp_cache.get(uid)
+    if entry:
+        return entry["data"]
+    return []
+
+
 # Product activation definitions:
 # (activation_date_col, opp_flag_col, product_label, spend_col_or_None)
 _PRODUCT_CHECKS = [
@@ -272,6 +285,11 @@ def run_zero_to_one(client, user_id=None, force: bool = False):
             return
 
         with_opp, missing_opp = _extract_activations(signals_df)
+
+        # Cache ALL missing opps for the Pipeline tab (before dedup filtering)
+        import time as _time
+        uid = user_id or "default"
+        _missing_opp_cache[uid] = {"data": missing_opp, "fetched_at": _time.time()}
 
         # Dedup: only send items not already alerted
         new_with_opp = []
