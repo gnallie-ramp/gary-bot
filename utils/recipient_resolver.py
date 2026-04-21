@@ -182,6 +182,35 @@ def resolve_outbound_recipients(
         max_cc=max_cc,
     )
 
+    # Signal-strength filter for CCs: drop contacts that lack BOTH a
+    # recognizable title AND any engagement signal. Greg's rule: owners,
+    # admins, and people who've actually engaged (Gong / email) — not
+    # random SFDC names with no context.
+    def _has_strong_title(c: dict) -> bool:
+        t = (c.get("title") or "").strip().lower()
+        if not t or t == "(from recent meeting)":
+            return False
+        admin_keywords = (
+            "cfo", "controller", "vp finance", "head of finance", "finance",
+            "accounting", "accountant", "director", "ceo", "coo", "cto",
+            "president", "founder", "owner", "operations", "ops ", "ap ",
+            "accounts payable", "procurement", "treasurer", "admin", "executive assistant",
+            "ea to", "bookkeeper", "payroll", "people ops",
+        )
+        return any(k in t for k in admin_keywords)
+
+    def _has_signal(c: dict) -> bool:
+        em = _norm(c.get("email", ""))
+        return (em in current or em in gong_participants
+                or em in email_correspondents or _has_strong_title(c))
+
+    # Keep CCs that have some signal OR, if that leaves 0, keep the top CC
+    # anyway so we don't accidentally send empty CC drafts.
+    strong_cc = [c for c in cc if _has_signal(c)]
+    if len(strong_cc) == 0 and cc:
+        strong_cc = cc[:1]  # keep one fallback
+    cc = strong_cc[:max_cc]
+
     # Annotate each selected contact with a human-readable "why" for the DM
     def _why(c: dict) -> str:
         if not c:
@@ -193,11 +222,13 @@ def resolve_outbound_recipients(
         elif em in gong_participants:
             reasons.append("recent Gong call participant")
         if em in email_correspondents:
-            reasons.append("active email correspondent")
+            reasons.append("recent email correspondent")
         title = (c.get("title") or "").strip()
         if title and title != "(from recent meeting)":
             reasons.append(f"SFDC: {title}")
-        return " · ".join(reasons) or "SFDC contact"
+        elif not reasons:
+            reasons.append("SFDC contact, no title on file, no recent engagement")
+        return " · ".join(reasons)
 
     if primary:
         primary["why"] = _why(primary)

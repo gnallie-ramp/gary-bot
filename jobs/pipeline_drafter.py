@@ -417,29 +417,45 @@ def draft_account_reengagement(account_payload: dict, client, user_id: str = Non
         )
 
     products = ", ".join(sorted({o.get("product") or o.get("type") or "?" for o in opps}))
-    play_tag = f"play {play_id}" if play_id else "unified re-engage"
-    opp_blurb = f"{len(opps)} {'open opp' if len(opps) != 1 else 'open opp'}{'s' if len(opps) != 1 else ''} ({products})"
+
+    # Context blurb: differentiate play-driven prospecting drafts (synthetic
+    # opps) from unified re-engage drafts that cover real open opps.
+    if play_id:
+        # Check whether we're using a synthetic opp or a real one
+        is_synthetic = bool(opps) and any(
+            (o.get("type") or "").startswith(("Prospecting -", "Activation -",
+                                              "Upgrade -", "Migration -", "Re-trial -"))
+            for o in opps
+        )
+        if is_synthetic:
+            header_tag = f"Play {play_id} prospecting draft"
+            context_blurb = f"pitching *{products}* to *{account_name}* — no open SFDC opp yet"
+        else:
+            header_tag = f"Play {play_id} re-engage draft"
+            context_blurb = f"covering {len(opps)} open opp{'s' if len(opps) != 1 else ''} ({products}) on *{account_name}*"
+    else:
+        header_tag = "Unified re-engage draft"
+        context_blurb = f"covering {len(opps)} open opp{'s' if len(opps) != 1 else ''} ({products}) on *{account_name}*"
 
     if created_ok:
         why_primary = primary.get("why") or "SFDC contact"
-        header = f":email: *{play_tag.capitalize()} draft saved to Gmail*"
         msg = (
-            f"{header}\n"
+            f":email: *{header_tag} saved to Gmail*\n"
             f"_{subject}_\n"
-            f"*To:* {to_email} _({why_primary})_  ·  covering {opp_blurb} on *{account_name}*"
+            f"*To:* {to_email} _({why_primary})_  ·  {context_blurb}"
         )
         if cc_contacts:
             cc_lines = [
-                f"  • {c['email']} _({c.get('why','')})_"
+                f"  • `{c['email']}` — _{c.get('why','SFDC contact')}_"
                 for c in cc_contacts
             ]
             msg += "\n*CC:*\n" + "\n".join(cc_lines)
         msg += f"\n:white_check_mark: Labeled: `{draft_label}`"
     else:
         msg = (
-            f":email: *{play_tag.capitalize()} draft queued*\n"
+            f":email: *{header_tag} queued*\n"
             f"_{subject}_\n"
-            f"*To:* {to_email}  ·  covering {opp_blurb} on *{account_name}*\n"
+            f"*To:* {to_email}  ·  {context_blurb}\n"
             f":warning: Direct Gmail creation failed — Glass cron will pick it up shortly."
         )
     client.chat_postMessage(channel=user_id, text=msg)

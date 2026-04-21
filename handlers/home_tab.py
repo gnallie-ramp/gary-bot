@@ -1867,6 +1867,8 @@ def _build_hot_list_tab(client, user_id):
     blocks.append({"type": "section",
         "text": {"type": "mrkdwn", "text": f"*Showing top {len(hot)} accounts*  _Sorted by match_score._"}})
 
+    from queries.plays import PLAYS as _PLAYS_META
+
     for i, entry in enumerate(hot, 1):
         acct_id = entry.get("account_id") or ""
         acct_name = entry.get("account_name") or "Unknown"
@@ -1874,39 +1876,72 @@ def _build_hot_list_tab(client, user_id):
         acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
 
         matching = entry.get("matching_plays") or []
-        plays_str = " · ".join(f"{p.get('icon', ':small_blue_diamond:')} `{p.get('play_id')}`" for p in matching[:4])
         match_score = int(entry.get("match_score") or 0)
-        est_cp = int(entry.get("est_cp_total") or 0)
+        first_row = entry.get("first_row") or {}
 
-        headline = f"*#{i:<2}* *{acct_str}*"
-        subline = f"_matches_: {plays_str}   ·   *match score* `{match_score:,}`"
-        if est_cp > 0:
-            subline += f"   ·   _est. signal CP_ ${est_cp:,}/mo"
-
-        # Single-button accessory: Draft kicks off a re-engage email for the
-        # first matching play. Other plays' matches are still shown in-line
-        # so you know WHY this account's ranked where it is.
+        # ── 1-line human summary — why this account is ranked where it is ──
+        # Use the top-matching play's sort_description_fn to pull the
+        # specific signal data (GLA, card spend, BP volume, etc.) into a
+        # readable sentence. Then tell the AM what to pitch.
         first_play = matching[0] if matching else {}
         first_pid = first_play.get("play_id", "")
-        payload = {
-            "account": acct_name,
-            "account_id": acct_id,
-            "play_id": first_pid,
-            "op": "draft",
-        }
+        first_play_meta = _PLAYS_META.get(first_pid, {})
+        try:
+            signal_desc = first_play_meta.get("sort_description_fn", lambda r: "")(first_row) or ""
+        except Exception:
+            signal_desc = ""
+
+        # Pitched product from play_hooks (Plus / Procurement / Bill Pay / etc.)
+        try:
+            from templates.play_hooks import get_pitched_product
+            pitched_product = get_pitched_product(first_pid, first_row) or ""
+        except Exception:
+            pitched_product = ""
+
+        # Team evidence hint if available
+        team_hint = ""
+        try:
+            from jobs.play_library import get_evidence_for_tags
+            from queries.plays import PLAY_ID_TO_ANATOMY_TAGS
+            ev = get_evidence_for_tags(PLAY_ID_TO_ANATOMY_TAGS.get(first_pid, []))
+            if ev and ev.get("deal_count", 0) > 0:
+                team_hint = f"Team {first_pid}: {ev['deal_count']} wins · avg ${int(ev.get('avg_realized_cp') or 0):,} CP"
+        except Exception:
+            pass
+
+        # Compose summary bits
+        summary_parts = []
+        if signal_desc:
+            summary_parts.append(signal_desc)
+        if pitched_product:
+            summary_parts.append(f":dart: *Pitch:* {pitched_product}")
+        if team_hint:
+            summary_parts.append(f":trophy: {team_hint}")
+        summary = " · ".join(summary_parts) if summary_parts else "_(no play metadata)_"
+
+        # All matching play IDs with icons, compact
+        plays_str = " · ".join(
+            f"{p.get('icon', ':small_blue_diamond:')} `{p.get('play_id')}` {p.get('title', '').split(' (')[0][:28]}"
+            for p in matching[:4]
+        )
+
+        headline = f"*#{i:<2}* *{acct_str}*  ·  match score `{match_score:,}`"
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"{headline}\n{subline}"},
+            "text": {"type": "mrkdwn", "text": f"{headline}\n{summary}\n_Matches:_ {plays_str}"},
             "accessory": {
                 "type": "overflow",
                 "action_id": f"hot_list_overflow_{acct_id}"[:150],
                 "options": [
                     {"text": {"type": "plain_text", "text": f":email: Draft ({first_pid})"},
-                     "value": json.dumps(payload)},
+                     "value": json.dumps({"account": acct_name, "account_id": acct_id,
+                                          "play_id": first_pid, "op": "draft"})},
                     {"text": {"type": "plain_text", "text": ":zzz: Snooze 30d"},
-                     "value": json.dumps({**payload, "op": "snooze"})},
+                     "value": json.dumps({"account": acct_name, "account_id": acct_id,
+                                          "play_id": first_pid, "op": "snooze"})},
                     {"text": {"type": "plain_text", "text": ":bust_in_silhouette: View in SFDC"},
-                     "value": json.dumps({**payload, "op": "view"})},
+                     "value": json.dumps({"account": acct_name, "account_id": acct_id,
+                                          "play_id": first_pid, "op": "view"})},
                 ],
             },
         })
