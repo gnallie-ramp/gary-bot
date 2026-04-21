@@ -256,55 +256,64 @@ Return a JSON object with these exact keys:
 - "buying_signals": string — specific quotes or evidence. "None detected" if nothing found.
 - "follow_up_email_to": string — best email to send follow-up to (from attendee emails, or empty)
 - "follow_up_email_subject": string — format: "Ramp Follow-Up - <brief summary of key topics discussed>"
-- "follow_up_email_body": string — HTML-formatted post-meeting email in 4
-    explicit sections, in this exact order. Use <strong> for section headers
-    and <ul><li> for bullets:
+- "follow_up_email_body": string — HTML-formatted post-meeting email that
+    sounds like a real AM wrote it, not an AI template.
 
-    <strong>Takeaways</strong>
+    STRUCTURE — open with a warm, specific greeting line (1 sentence, NOT
+    "I hope this finds you well"), then move into the recap. Example opener:
+      <p>Hi [First Name], great chat today — thanks for walking through the AP setup.</p>
+    Then follow with these sections (headers in <strong>, bullets in <ul><li>):
+
+    <strong>Quick recap</strong>
     <ul>
-      <li>3-5 bullets pairing a specific thing the customer said on the call
-          (dollar amount, vendor, timeline, named person) with the Ramp
-          capability that addresses it. Never generic. Cite exact numbers
-          and names from the transcript.</li>
+      <li>3-5 bullets summarizing what they said on the call and the Ramp
+          angle that maps to it. Write naturally — not every bullet has to
+          be "pain → feature". Some bullets can just name a specific number
+          or vendor they mentioned and why it matters. Vary the sentence
+          structure. Cite exact numbers, vendor names, and stakeholder
+          names from the transcript — never generic.</li>
     </ul>
 
     <strong>[Customer First Name]'s Next Steps</strong>
     <ul>
-      <li>2-4 bullets, 2nd person, describing what the CUSTOMER owns.
-          "Stella: ask Roger for admin access." Route items to named
-          stakeholders when clear. Replace [Customer First Name] in the header
-          with the actual first name of the primary recipient.</li>
+      <li>2-4 bullets, 2nd person, conversational. Prefer natural
+          phrasing like "Grab the policy PDF when you can" over
+          "[Name]: Do X". Route to named stakeholders when clear.
+          Replace [Customer First Name] in the header with the actual
+          first name of the primary recipient.</li>
     </ul>
 
-    <strong>[Your First Name]'s Next Steps</strong>
+    <strong>My Next Steps</strong>
     <ul>
-      <li>1-3 bullets, 1st person, describing what YOU own. Replace
-          [Your First Name] in the header with the Ramp AM's first name.
-          End with a specific deeper-dive ask with a 2-day time window, e.g.
-          "I'll schedule a 30-min working session next Tuesday or
-          Wednesday to walk through Treasury setup — what times work?"</li>
+      <li>1-3 bullets, 1st person, conversational. End with ONE specific
+          follow-up ask — either a working session with a flexible
+          time suggestion ("any chance we could grab 30 min later this
+          week?"), or a specific deliverable with a date. Avoid the rigid
+          "next Tuesday or Wednesday" pattern unless the transcript
+          specifically implies that timing.</li>
     </ul>
 
     <strong>Resources</strong>
     <ul>
       <li>2-4 Ramp help-article links from the AVAILABLE RAMP RESOURCE
-          LINKS above. Format: <a href="URL">Title</a>. Only include if
-          resources are provided; otherwise OMIT this entire section.</li>
+          LINKS above. Format: <a href="URL">Title</a>. Omit this section
+          entirely if no resources are provided.</li>
     </ul>
 
     After the 4 sections, add one line before the signature:
       <p>Book a call: <a href="{booking_link}">{booking_link}</a></p>
 
-    TONE: warm, direct, contractions natural. No "I hope this email finds
-    you well", no "just circling back", no "touching base", no generic
-    nurture talk. A real AM driving the deal.
+    TONE: warm, direct, contractions natural. Write like a real AM who
+    just got off the call, not a structured AI. Use short sentences.
+    Vary bullet phrasing. No "I hope this email finds you well", no
+    "just circling back", no "touching base", no generic nurture talk.
 
     HARD RULES — violations are failures:
     * Do NOT say "I was notified" / anything implying an automated alert
     * Do NOT guilt-trip about unanswered emails
-    * Do NOT invent facts. Every Takeaway must be traceable to the transcript.
+    * Do NOT invent facts. Every recap bullet must be traceable to the transcript.
     * Do NOT use markdown. HTML tags only: <strong>, <ul>, <li>, <a>, <br>, <p>
-    * 250-400 words total (longer than the old 100-150 to fit the 4 sections).
+    * 200-350 words total. Shorter + warmer beats longer + structured.
 - "follow_up_email_cc": string — other emails to CC, comma-separated, or empty
 - "opps": list of objects, each with:
     - "product": string (one of "Card Expansion", "Bill Pay Expansion", "Travel Expansion", "Treasury Expansion", "Procurement")
@@ -474,16 +483,10 @@ def _send_glass_style_dm(results: list[dict], client, dm_target=None):
 
         if email_to and email_body:
 
-            # email_body is already HTML from Claude prompt
+            # email_body is already HTML from Claude prompt — the prompt
+            # instructs Claude to include a *Resources* section inline, so
+            # no separate append here (would produce a duplicate section).
             html_body = email_body
-
-            # If the body doesn't already contain hyperlinked resources,
-            # append a "Helpful resources" section from help_links
-            item_links = item.get("relevant_links", [])
-            if "helpful resource" not in html_body.lower() and item_links:
-                links_html = format_links_for_email(item_links)
-                if links_html:
-                    html_body += f"<br>{links_html}"
 
             try:
                 from templates.signature import build_signature
