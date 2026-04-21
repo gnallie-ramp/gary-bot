@@ -411,3 +411,23 @@ def run_play(play_id: str, user_id: str = None):
     play = PLAYS[play_id]
     sql = format_query(play["query"], user_id=user_id)
     return run_query(sql)
+
+
+# Play-ID → Deal Anatomy play_tags mapping. When the Play Library aggregates
+# CW deals across the team, these tags are how each Plays-tab row pulls its
+# "Team evidence" footer (deal count, avg CP, top pain points, etc.).
+# Anatomy tags enum (from jobs/deal_anatomy.py system prompt): plus_upgrade,
+# procurement_upgrade, bill_pay_migration, card_consolidation, treasury_attach,
+# activation_rescue, multi_entity, erp_integration, international_scale.
+PLAY_ID_TO_ANATOMY_TAGS = {
+    "P1":  ["plus_upgrade", "erp_integration"],
+    "P2":  ["plus_upgrade"],
+    "P5":  ["procurement_upgrade"],
+    "P6":  ["procurement_upgrade"],
+    "P7":  ["bill_pay_migration", "activation_rescue"],
+    "P8":  ["bill_pay_migration"],
+    "P9":  ["activation_rescue"],
+    "P11": ["international_scale", "multi_entity", "plus_upgrade"],
+    "P12": ["treasury_attach"],
+    "P13": ["card_consolidation", "multi_entity", "plus_upgrade", "treasury_attach"],
+}

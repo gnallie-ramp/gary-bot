@@ -1255,19 +1255,65 @@ def _build_plays_section(user_id) -> list:
             },
         })
 
-        if is_expanded and count > 0:
-            for row in rows[:10]:
-                blocks.append(_render_play_card(play_id, meta, row))
-            if count > 10:
+        if is_expanded:
+            # Team evidence footer from the Play Pattern Library, if available
+            try:
+                from jobs.play_library import get_evidence_for_tags
+                from queries.plays import PLAY_ID_TO_ANATOMY_TAGS
+                ev = get_evidence_for_tags(PLAY_ID_TO_ANATOMY_TAGS.get(play_id, []))
+            except Exception:
+                ev = None
+
+            if ev and ev.get("deal_count", 0) > 0:
+                # Team evidence callout
+                n = ev["deal_count"]
+                avg_cp = int(ev.get("avg_realized_cp") or 0)
+                total_cp = int(ev.get("total_realized_cp") or 0)
+                lines = [
+                    f":trophy: *Team evidence — {n} CW deals match this play pattern*",
+                    f"_Avg realized CP ${avg_cp:,}/deal · total ${total_cp:,} across team (L180d)._",
+                ]
+                # Top pain themes
+                pain_themes = ev.get("top_pain_themes") or []
+                if pain_themes:
+                    pt_strs = [f"`{p['theme']}` ({p['count']}×)" for p in pain_themes[:4]]
+                    lines.append(f"*Top pain themes:* {' · '.join(pt_strs)}")
+                # Top features used
+                feats = ev.get("top_features") or []
+                if feats:
+                    f_strs = [f"{f['feature']} ({f['count']}×)" for f in feats[:5]]
+                    lines.append(f"*Features that closed deals:* {', '.join(f_strs)}")
+                # Top champion roles
+                roles = ev.get("top_champion_roles") or []
+                if roles:
+                    r_strs = [f"{r['role']} ({r['count']}×)" for r in roles[:3]]
+                    lines.append(f"*Champion roles:* {', '.join(r_strs)}")
+                # Winning phrases
+                phrases = ev.get("winning_phrases") or []
+                if phrases:
+                    ph_strs = [f"`{p['phrase']}`" for p in phrases[:5]]
+                    lines.append(f"*Phrases that landed:* {' · '.join(ph_strs)}")
+                # One sample winning move
+                moves = ev.get("sample_winning_moves") or []
+                if moves:
+                    lines.append(f":sparkles: _Winning move example:_ {moves[0][:250]}")
+
+                blocks.append({"type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
+            if count > 0:
+                for row in rows[:10]:
+                    blocks.append(_render_play_card(play_id, meta, row))
+                if count > 10:
+                    blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"_Showing 10 of {count} — snooze or draft to work through the list._"}],
+                    })
+            else:
                 blocks.append({
-                    "type": "context",
-                    "elements": [{"type": "mrkdwn", "text": f"_Showing 10 of {count} — snooze or draft to work through the list._"}],
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "_No accounts match this play right now._"},
                 })
-        elif is_expanded and count == 0:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "_No accounts match this play right now._"},
-            })
 
         blocks.append({"type": "divider"})
 

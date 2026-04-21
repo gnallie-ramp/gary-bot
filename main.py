@@ -340,6 +340,17 @@ def _start_scheduler():
         name="Deal Anatomy Batch",
     )
 
+    # Play Library rebuild: Nightly 3 AM PT (after Deal Anatomy batch
+    # finishes). Aggregates per-deal JSON files into the Play Pattern Library
+    # used by the Plays tab's Team Evidence footer.
+    from jobs.play_library import rebuild as run_play_library_rebuild
+    scheduler.add_job(
+        _wrap(run_play_library_rebuild),
+        CronTrigger(hour=3, minute=0),
+        id="play_library_rebuild",
+        name="Play Library Rebuild",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(
