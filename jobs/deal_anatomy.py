@@ -278,6 +278,93 @@ def get_cached(opp_id: str) -> Optional[dict]:
         return None
 
 
+def get_first_touch_story(account_id: str) -> Optional[dict]:
+    """Return how the first conversation with this account started.
+
+    Compares first email (any direction) to first Gong call and classifies:
+      - 'outbound_email'     — Ramp emailed first, call followed
+      - 'inbound_email'      — Customer emailed first, call followed
+      - 'app_or_direct_book' — First call with no preceding email (likely
+                                booked via ChiliPiper / self-serve / referral)
+      - 'unknown'            — Nothing on file
+
+    Returns dict like:
+      {"kind": "outbound_email", "label": "Outbound email → reply → call",
+       "first_email_date": date, "first_email_direction": "Outbound",
+       "first_email_owner": "Gregory Nallie", "first_email_subject": "…",
+       "first_customer_reply_date": date, "first_call_date": date,
+       "days_email_to_call": 12}
+    """
+    from core.snowflake_client import run_query
+    from queries.deal_anatomy import DEAL_FIRST_TOUCH_QUERY
+
+    try:
+        df = run_query(DEAL_FIRST_TOUCH_QUERY.format(account_id=account_id))
+    except Exception as e:
+        logger.debug("First touch query failed for %s: %s", account_id, e)
+        return None
+    if df.empty:
+        return None
+    r = df.iloc[0].to_dict()
+
+    from datetime import date as _date
+    def _as_date(v):
+        if v is None or v == "" or (isinstance(v, float) and v != v):
+            return None
+        if isinstance(v, _date):
+            return v
+        try:
+            return _date.fromisoformat(str(v)[:10])
+        except (ValueError, TypeError):
+            return None
+
+    first_email_date = _as_date(r.get("first_email_date"))
+    first_email_dir = (r.get("first_email_direction") or "").strip()
+    first_call_date = _as_date(r.get("first_call_date"))
+    first_reply_date = _as_date(r.get("first_customer_reply_date"))
+
+    if first_email_date and first_call_date:
+        days_diff = (first_call_date - first_email_date).days
+        if first_email_dir.lower() == "outbound" and days_diff >= 0:
+            kind = "outbound_email"
+            label = f"Outbound email → call (booked {days_diff}d later)"
+        elif first_email_dir.lower() == "inbound" and days_diff >= 0:
+            kind = "inbound_email"
+            label = f"Inbound email → call (booked {days_diff}d later)"
+        elif days_diff < 0:
+            kind = "app_or_direct_book"
+            label = f"Call happened before any email ({abs(days_diff)}d earlier) — likely app-book or direct reach-out"
+        else:
+            kind = "email_same_day"
+            label = "Email + call same day"
+    elif first_call_date and not first_email_date:
+        kind = "app_or_direct_book"
+        label = "Call with no preceding email — likely ChiliPiper / self-serve / direct reach-out"
+    elif first_email_date and not first_call_date:
+        kind = f"{first_email_dir.lower()}_email_no_call"
+        label = f"{first_email_dir.title()} email only — no call on file"
+    else:
+        kind = "unknown"
+        label = "No email or call on file"
+
+    days_email_to_call = None
+    if first_email_date and first_call_date:
+        days_email_to_call = (first_call_date - first_email_date).days
+
+    return {
+        "kind": kind,
+        "label": label,
+        "first_email_date": str(first_email_date) if first_email_date else None,
+        "first_email_direction": first_email_dir or None,
+        "first_email_subject": r.get("first_email_subject"),
+        "first_email_owner": r.get("first_email_owner"),
+        "first_email_owner_role": r.get("first_email_owner_role"),
+        "first_customer_reply_date": str(first_reply_date) if first_reply_date else None,
+        "first_call_date": str(first_call_date) if first_call_date else None,
+        "days_email_to_call": days_email_to_call,
+    }
+
+
 def run_batch(lookback_days: int = 180, max_deals: int = 40) -> dict:
     """Scheduled batch: analyze all CW expansion deals from the last N days
     that have realized CP ≥ MIN_REALIZED_CP and haven't been analyzed yet.

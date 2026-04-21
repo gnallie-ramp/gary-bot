@@ -86,3 +86,42 @@ LEFT JOIN analytics.marts.agg_sfdc_expansion_opportunity_spend s
     ON s.opportunity_id = opp.opportunity_id
 WHERE opp.opportunity_id = '{opp_id}'
 """
+
+
+# ── First-touch story: how did this conversation start? ─────────────────────
+# Pulls the earliest engagement signals on the account (vs CW date) to answer:
+# "Did the meeting come from an outbound email Greg sent? A customer reaching
+# out? An app trial? Something else?"
+DEAL_FIRST_TOUCH_QUERY = """
+WITH earliest_email AS (
+    SELECT
+        first_email_created_at,
+        first_email_direction,
+        first_sfdc_email_subject AS first_email_subject,
+        thread_owner_full_name AS first_email_owner,
+        thread_owner_user_role AS first_email_owner_role
+    FROM analytics.marts.dim_email_threads
+    WHERE sfdc_account_id = '{account_id}'
+      AND first_email_created_at IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (ORDER BY first_email_created_at ASC) = 1
+),
+first_reply AS (
+    SELECT MIN(first_contact_reply_at) AS first_customer_reply_at
+    FROM analytics.marts.dim_email_threads
+    WHERE sfdc_account_id = '{account_id}'
+),
+first_call AS (
+    SELECT MIN(gong_call_start)::date AS first_call_date
+    FROM analytics.marts.dim_sfdc_gong_call
+    WHERE sfdc_primary_account_id = '{account_id}'
+)
+SELECT
+    (SELECT first_email_created_at::date FROM earliest_email) AS first_email_date,
+    (SELECT first_email_direction        FROM earliest_email) AS first_email_direction,
+    (SELECT first_email_subject          FROM earliest_email) AS first_email_subject,
+    (SELECT first_email_owner            FROM earliest_email) AS first_email_owner,
+    (SELECT first_email_owner_role       FROM earliest_email) AS first_email_owner_role,
+    (SELECT first_customer_reply_at::date FROM first_reply)   AS first_customer_reply_date,
+    (SELECT first_call_date              FROM first_call)     AS first_call_date
+"""
+

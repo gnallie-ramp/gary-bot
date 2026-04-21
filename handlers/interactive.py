@@ -1603,6 +1603,49 @@ def register_interactive_handlers(app):
 
         threading.Thread(target=_refresh, daemon=True).start()
 
+    @app.action({"action_id": re.compile(r"^team_intel_peer_")})
+    def handle_team_intel_peer_select(ack, body, client):
+        """Swap the 'top deals' section to show a selected peer's deals.
+        Value = peer name (blank = deselect, return to own deals)."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        peer_name = action.get("value") or ""
+
+        from handlers.home_tab import _team_intel_peer, _team_intel_expanded
+        if peer_name:
+            _team_intel_peer[user_id] = peer_name
+        else:
+            _team_intel_peer.pop(user_id, None)
+        # Expand state tied to opp_ids that differ between peers → reset
+        _team_intel_expanded[user_id] = set()
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after team_intel peer select failed: %s", e)
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action("team_intel_library_toggle")
+    def handle_team_intel_library_toggle(ack, body, client):
+        """Toggle the Play Library browser on Team Intel."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        from handlers.home_tab import _team_intel_show_library
+        _team_intel_show_library[user_id] = not _team_intel_show_library.get(user_id, False)
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after team_intel library toggle failed: %s", e)
+        threading.Thread(target=_refresh, daemon=True).start()
+
     @app.action({"action_id": re.compile(r"^team_intel_deal_")})
     def handle_team_intel_deal_toggle(ack, body, client):
         """Expand/collapse a deal card in Team Intel tab."""

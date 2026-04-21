@@ -1758,6 +1758,10 @@ _team_cp_cache = {}   # {(user_id, lookback_days): {"leaderboard": df, "my_deals
 _team_cp_window = {}  # user_id -> lookback_days (default 180)
 # Per-user expanded deal set
 _team_intel_expanded = {}  # user_id -> set(opportunity_id)
+# Per-user selected peer to view (None = self)
+_team_intel_peer = {}  # user_id -> peer_name or None
+# Per-user: is the Play Library browser expanded?
+_team_intel_show_library = {}  # user_id -> bool
 
 _TEAM_CP_TTL_SEC = 3600
 
@@ -2003,6 +2007,14 @@ def _build_team_intel_tab(client, user_id):
         if d == lookback_days:
             btn["style"] = "primary"
         window_btns.append(btn)
+    library_open = _team_intel_show_library.get(user_id, False)
+    window_btns.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": ":books: Hide Play Library" if library_open else ":books: Play Library"},
+        "action_id": "team_intel_library_toggle",
+        "value": "toggle",
+        **({"style": "primary"} if library_open else {}),
+    })
     window_btns.append({
         "type": "button",
         "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Refresh"},
@@ -2010,6 +2022,65 @@ def _build_team_intel_tab(client, user_id):
         "value": "refresh",
     })
     blocks.append({"type": "actions", "elements": window_btns})
+
+    # ── Play Library browser (collapsible) ─────────────────────────────────
+    if library_open:
+        blocks.append({"type": "divider"})
+        try:
+            from jobs.play_library import load as _load_library
+            lib = _load_library()
+        except Exception:
+            lib = None
+
+        if not lib or not lib.get("tags"):
+            blocks.append({"type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    ":books: *Play Library*\n_No library yet — the nightly Deal Anatomy + Play Library rebuild jobs "
+                    "(2/3 AM PT) haven't populated data. Check back tomorrow, or run manually._"
+                )}})
+        else:
+            built = lib.get("built_at", "")
+            n_deals = lib.get("source_deals_analyzed", 0)
+            blocks.append({"type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    f":books: *Play Library — {n_deals} analyzed CW deals across the team*\n"
+                    f"_Built {built}. Each play_tag aggregates every deal whose Anatomy "
+                    f"flagged that tag. These are the patterns that actually close deals._"
+                )}})
+            # Sort tags by total realized CP
+            tag_items = list((lib.get("tags") or {}).items())
+            tag_items.sort(key=lambda kv: kv[1].get("total_realized_cp", 0), reverse=True)
+
+            for tag, entry in tag_items:
+                dc = entry.get("deal_count", 0)
+                avg = int(entry.get("avg_realized_cp") or 0)
+                total = int(entry.get("total_realized_cp") or 0)
+                lines = [
+                    f"*`{tag}`* — {dc} deals · total *${total:,}* CP · avg *${avg:,}* CP/deal",
+                ]
+                # Top pain themes
+                pains = entry.get("top_pain_themes") or []
+                if pains:
+                    pain_str = " · ".join(f"`{p['theme']}` ({p['count']}×)" for p in pains[:3])
+                    lines.append(f"_Pain themes:_ {pain_str}")
+                # Top features
+                feats = entry.get("top_features") or []
+                if feats:
+                    feat_str = ", ".join(f"{f['feature']} ({f['count']}×)" for f in feats[:4])
+                    lines.append(f"_Features that closed:_ {feat_str}")
+                # Winning phrases
+                phrases = entry.get("winning_phrases") or []
+                if phrases:
+                    ph_str = " · ".join(f"`{p['phrase']}`" for p in phrases[:4])
+                    lines.append(f"_Phrases that landed:_ {ph_str}")
+                # One winning move exemplar
+                moves = entry.get("sample_winning_moves") or []
+                if moves:
+                    lines.append(f":sparkles: _{moves[0][:200]}_")
+                blocks.append({"type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+
+        blocks.append({"type": "divider"})
 
     # ── Fetch data ──────────────────────────────────────────────────────────
     try:
@@ -2046,7 +2117,8 @@ def _build_team_intel_tab(client, user_id):
                 f"*${my_cp:,} realized CP* _(= {pct_of_team:.1f}% of the team's ${total_team_cp:,})_"
             )}]})
 
-    # Render every rep as a section block — highlight the caller
+    # Render every rep as a section block — highlight the caller + peer drill-in button
+    selected_peer = _team_intel_peer.get(user_id)
     for i, row in leaderboard.reset_index(drop=True).iterrows():
         rank = i + 1
         owner = row.get("owner") or "?"
@@ -2055,28 +2127,74 @@ def _build_team_intel_tab(client, user_id):
         bp = int(row.get("bp_cp") or 0)
         deals = int(row.get("deals") or 0)
         is_me = owner == me_name
-        prefix = ":star:" if is_me else "  "
-        name_fmt = f"*{owner}*" if is_me else owner
-        blocks.append({"type": "section",
+        is_selected = owner == selected_peer
+        if is_me and not selected_peer:
+            prefix = ":star:"
+        elif is_selected:
+            prefix = ":mag:"
+        else:
+            prefix = "  "
+        name_fmt = f"*{owner}*" if (is_me or is_selected) else owner
+
+        row_block = {"type": "section",
             "text": {"type": "mrkdwn", "text": (
                 f"{prefix} `#{rank:>2}` {name_fmt} — *${total:,}* CP  "
                 f"`Card ${card:,}` · `BP ${bp:,}` · {deals} deals"
-            )}})
+            )}}
+        # Non-self rows get a button to drill into that rep's deals
+        if not is_me:
+            row_block["accessory"] = {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View deals" if not is_selected else "× Clear"},
+                "action_id": f"team_intel_peer_{i}"[:150],
+                "value": "" if is_selected else owner,
+            }
+        blocks.append(row_block)
 
-    # ── Your top deals ──────────────────────────────────────────────────────
+    # ── Top deals (yours or selected peer's) ───────────────────────────────
     blocks.append({"type": "divider"})
-    if my_deals is None or my_deals.empty:
+
+    # If a peer is selected, override my_deals with their deals (on-demand fetch)
+    display_deals = my_deals
+    deals_owner = me_name
+    deals_header_icon = ":medal:"
+    if selected_peer and selected_peer != me_name:
+        deals_owner = selected_peer
+        deals_header_icon = ":mag:"
+        try:
+            from queries.team_cp import TOP_DEALS_QUERY
+            from core.snowflake_client import run_query
+            peer_df = run_query(TOP_DEALS_QUERY.format(
+                lookback_days=lookback_days,
+                owner_name=selected_peer.replace("'", "''"),
+                top_n=20,
+            ))
+            display_deals = peer_df
+        except Exception as e:
+            logger.error("Peer deals fetch failed for %s: %s", selected_peer, e)
+            display_deals = None
+
+    if display_deals is None or display_deals.empty:
         blocks.append({"type": "section",
-            "text": {"type": "mrkdwn", "text": "_No CW deals in this window for you — try widening the lookback or check SFDC ownership._"}})
+            "text": {"type": "mrkdwn", "text": (
+                f"_No CW deals in this window for {deals_owner}._" if selected_peer
+                else "_No CW deals in this window for you — try widening the lookback or check SFDC ownership._"
+            )}})
         return blocks
 
+    if selected_peer and selected_peer != me_name:
+        deals_title = f"*{deals_header_icon} {deals_owner}'s top deals — last {lookback_days} days*"
+        deals_sub = f"_Viewing peer deals. Click × Clear on their leaderboard row to return to your own._"
+    else:
+        deals_title = f"*{deals_header_icon} Your top deals — last {lookback_days} days*"
+        deals_sub = "_Sorted by realized CP. Click Expand for spend detail, first-touch story, and AI deal anatomy._"
+
     blocks.append({"type": "section",
-        "text": {"type": "mrkdwn", "text": f"*:medal: Your top deals — last {lookback_days} days*"}})
+        "text": {"type": "mrkdwn", "text": deals_title}})
     blocks.append({"type": "context",
-        "elements": [{"type": "mrkdwn", "text": (
-            "_Sorted by realized CP. Click Expand to see incremental spend detail. "
-            "Deal Anatomy (call transcripts + email thread analysis) is Phase 2._"
-        )}]})
+        "elements": [{"type": "mrkdwn", "text": deals_sub}]})
+
+    my_deals = display_deals  # downstream rendering uses my_deals
 
     expanded = _team_intel_expanded.get(user_id, set())
     for _, row in my_deals.iterrows():
@@ -2113,12 +2231,34 @@ def _build_team_intel_tab(client, user_id):
         if is_open:
             # Try to load Deal Anatomy JSON from the nightly batch cache
             try:
-                from jobs.deal_anatomy import get_cached
+                from jobs.deal_anatomy import get_cached, get_first_touch_story
                 anatomy = get_cached(opp_id)
+                first_touch = get_first_touch_story(acct_id) if acct_id else None
             except Exception:
                 anatomy = None
+                first_touch = None
 
-            # Spend detail (always shown)
+            # First-touch story — how the deal started
+            if first_touch:
+                ft_lines = [f":arrow_forward: *How this started:* {first_touch.get('label', '?')}"]
+                first_email_owner = first_touch.get("first_email_owner") or ""
+                first_email_role = first_touch.get("first_email_owner_role") or ""
+                first_email_subject = first_touch.get("first_email_subject") or ""
+                first_email_date = first_touch.get("first_email_date") or ""
+                first_call_date = first_touch.get("first_call_date") or ""
+                reply_date = first_touch.get("first_customer_reply_date") or ""
+                if first_email_date:
+                    owner_tag = f" by {first_email_owner}" + (f" ({first_email_role})" if first_email_role else "")
+                    ft_lines.append(f"• First email: *{first_email_date}*{owner_tag}" +
+                                    (f" — _\"{first_email_subject[:80]}\"_" if first_email_subject else ""))
+                if reply_date:
+                    ft_lines.append(f"• First customer reply: *{reply_date}*")
+                if first_call_date:
+                    ft_lines.append(f"• First Gong call: *{first_call_date}*")
+                blocks.append({"type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(ft_lines)}})
+
+            # Spend detail
             spend_lines = []
             if inc_card > 0:
                 spend_lines.append(f"Incremental card spend vs. baseline: *${inc_card:,}* (30d max within 90d post-CW)")
