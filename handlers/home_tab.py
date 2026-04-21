@@ -1896,16 +1896,94 @@ def _build_team_intel_tab(client, user_id):
         blocks.append(block)
 
         if is_open:
-            detail_lines = []
+            # Try to load Deal Anatomy JSON from the nightly batch cache
+            try:
+                from jobs.deal_anatomy import get_cached
+                anatomy = get_cached(opp_id)
+            except Exception:
+                anatomy = None
+
+            # Spend detail (always shown)
+            spend_lines = []
             if inc_card > 0:
-                detail_lines.append(f"• Incremental card spend vs. baseline: *${inc_card:,}* (30d max within 90d post-CW)")
+                spend_lines.append(f"Incremental card spend vs. baseline: *${inc_card:,}* (30d max within 90d post-CW)")
             if inc_bp > 0:
-                detail_lines.append(f"• Incremental BP spend vs. baseline: *${inc_bp:,}*")
+                spend_lines.append(f"Incremental BP spend vs. baseline: *${inc_bp:,}*")
             if acct_id:
-                detail_lines.append(f"• <{SF_BASE_URL}/r/Account/{acct_id}/view|Open account in Salesforce>")
-            detail_lines.append("_:sparkles: Deal Anatomy (winning messaging patterns, pain points, call excerpts) coming in Phase 2._")
-            blocks.append({"type": "context",
-                "elements": [{"type": "mrkdwn", "text": "\n".join(detail_lines)}]})
+                spend_lines.append(f"<{SF_BASE_URL}/r/Account/{acct_id}/view|Open account in Salesforce>")
+            if spend_lines:
+                blocks.append({"type": "context",
+                    "elements": [{"type": "mrkdwn", "text": " · ".join(spend_lines)}]})
+
+            if anatomy and "winning_move" in anatomy:
+                # ── Winning move ──────────────────────────────────────
+                blocks.append({"type": "section",
+                    "text": {"type": "mrkdwn", "text": (
+                        f":sparkles: *Winning Move*\n{anatomy.get('winning_move', '')}"
+                    )}})
+
+                # ── Pain points ──────────────────────────────────────
+                pain_points = anatomy.get("pain_points") or []
+                if pain_points:
+                    pp_lines = ["*Pain points (verbatim):*"]
+                    for pp in pain_points[:4]:
+                        q = (pp.get("quote") or "").strip()[:220]
+                        theme = pp.get("theme") or ""
+                        src = pp.get("source") or ""
+                        pp_lines.append(f"• _\"{q}\"_  `{theme}` _({src})_")
+                    blocks.append({"type": "section",
+                        "text": {"type": "mrkdwn", "text": "\n".join(pp_lines)}})
+
+                # ── Features + framing row ────────────────────────────
+                features = anatomy.get("ramp_features_used") or []
+                framing = anatomy.get("pitch_framing") or ""
+                play_tags = anatomy.get("play_tags") or []
+                mid_lines = []
+                if features:
+                    mid_lines.append(f"*Ramp features used:* {', '.join(features[:6])}")
+                if framing:
+                    mid_lines.append(f"*Pitch framing:* {framing}")
+                if play_tags:
+                    mid_lines.append(f"*Play tags:* {' · '.join(f'`{t}`' for t in play_tags[:4])}")
+                if mid_lines:
+                    blocks.append({"type": "section",
+                        "text": {"type": "mrkdwn", "text": "\n".join(mid_lines)}})
+
+                # ── Champion + messaging ─────────────────────────────
+                champ = anatomy.get("champion") or {}
+                mp = anatomy.get("messaging_patterns") or {}
+                bottom = []
+                if champ.get("name"):
+                    bottom.append(
+                        f"*Champion:* {champ.get('name')} ({champ.get('role') or '?'})"
+                        + (f" — _{champ.get('why')}_" if champ.get("why") else "")
+                    )
+                fe = mp.get("first_email_that_got_reply") or {}
+                if isinstance(fe, dict) and fe.get("subject"):
+                    bottom.append(f"*First-reply subject:* `{fe.get('subject')}`")
+                    if fe.get("opening"):
+                        bottom.append(f"*Opening line:* _\"{fe['opening'][:200]}\"_")
+                phrases = mp.get("repeated_phrases") or []
+                if phrases:
+                    bottom.append("*Phrases that landed:* " + " · ".join(f"`{p}`" for p in phrases[:4]))
+                if bottom:
+                    blocks.append({"type": "section",
+                        "text": {"type": "mrkdwn", "text": "\n".join(bottom)}})
+
+                # ── Insights ─────────────────────────────────────────
+                if anatomy.get("insights"):
+                    blocks.append({"type": "context",
+                        "elements": [{"type": "mrkdwn", "text": (
+                            f":bulb: _{anatomy['insights']}_"
+                        )}]})
+            else:
+                blocks.append({"type": "context",
+                    "elements": [{"type": "mrkdwn", "text": (
+                        ":sparkles: _Deal Anatomy not yet analyzed for this deal. "
+                        "Nightly batch runs at 2 AM PT — check back tomorrow, or run "
+                        "manually via `/gary-analyze-deal "
+                        f"{opp_id}` (coming soon)._"
+                    )}]})
 
     # Cache freshness footer
     key = (user_id or "default", lookback_days)

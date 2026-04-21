@@ -330,6 +330,16 @@ def _start_scheduler():
         name="Play Discovery",
     )
 
+    # Deal Anatomy batch: Nightly 2 AM PT — Claude analyzes CW expansion
+    # deals (realized CP ≥ $500) with transcripts + email bodies, caches JSON.
+    from jobs.deal_anatomy import run_batch as run_deal_anatomy_batch
+    scheduler.add_job(
+        _wrap(run_deal_anatomy_batch),
+        CronTrigger(hour=2, minute=0),
+        id="deal_anatomy_batch",
+        name="Deal Anatomy Batch",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(
