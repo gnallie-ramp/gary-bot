@@ -201,12 +201,161 @@ def _p13_synth(row: dict) -> dict:
             "est_cp": 0}
 
 
+# ── P2: Plus-feature trialer (didn't convert) ───────────────────────────────
+def _p2_context(row: dict) -> str:
+    status = row.get("plus_product_status_v2") or "trialed but did not convert"
+    card = _fmt_money(row.get("card_l30d"))
+    est_cp = _fmt_money(row.get("est_card_cp_monthly"))
+    users = int(row.get("user_count") or 0)
+    return (
+        f"PLAY: P2 — Plus-feature trialer. This account had Plus in trial "
+        f"and chose not to convert (status: {status}). Current card spend: "
+        f"{card}/mo · {users} users · est Plus CP upside: {est_cp}/mo.\n"
+        f"PITCH ANGLE: They've already seen the product, so skip the demo "
+        f"intro. Lead Takeaways by addressing what likely killed the trial "
+        f"(price perception, specific unused features, bad timing) and "
+        f"re-open with one concrete Plus feature that matches their current "
+        f"pattern — AI coding for high-volume card spenders, advanced "
+        f"policies for large teams, SSO/SCIM for 20+ user rollouts. Close "
+        f"with a 15-min feature-specific walk-through, not a full demo. Be "
+        f"direct: \"Last time you trialed, X. Since then Y has shipped — "
+        f"worth 15 min to revisit?\""
+    )
+
+
+def _p2_synth(row: dict) -> dict:
+    return {"product": "Plus", "type": "Re-trial - Plus", "stage": "S0",
+            "monthly_amount": 0, "next_step": "",
+            "expansion_notes": f"Previously trialed Plus, did not convert ({row.get('plus_product_status_v2', '')})",
+            "est_cp": row.get("est_card_cp_monthly") or 0}
+
+
+# ── P6: Legacy Procurement → Add-on ─────────────────────────────────────────
+def _p6_context(row: dict) -> str:
+    ltd = int(row.get("ltd_pos") or 0)
+    l90 = int(row.get("pos_l90d") or 0)
+    bp = _fmt_money(row.get("bp_l30d"))
+    return (
+        f"PLAY: P6 — Legacy Procurement → Add-on upgrade. This account is "
+        f"on the PROCUREMENT_LEGACY tier with {ltd} lifetime POs created "
+        f"({l90} in the last 90 days). Monthly BP: {bp}.\n"
+        f"PITCH ANGLE: This is an UPGRADE conversation, not a new-product "
+        f"pitch. They already know how Ramp Procurement works. Lead "
+        f"Takeaways with what the modern Add-on adds vs. their legacy tier "
+        f"— customizable intake forms, 3-way match on bill import, contract "
+        f"renewal tracking, AI-assisted sourcing, vendor-portal, approval "
+        f"chains tied to spend programs. Reference their PO volume ({ltd} "
+        f"POs) as evidence this investment pays off. Close with a 30-min "
+        f"migration planning session."
+    )
+
+
+def _p6_synth(row: dict) -> dict:
+    return {"product": "Procurement", "type": "Upgrade - Procurement Add-on",
+            "stage": "S0", "monthly_amount": 0, "next_step": "",
+            "expansion_notes": f"On PROCUREMENT_LEGACY, {int(row.get('ltd_pos') or 0)} lifetime POs",
+            "est_cp": 0}
+
+
+# ── P8: Competitor AP migration ─────────────────────────────────────────────
+def _p8_context(row: dict) -> str:
+    off = _fmt_money(row.get("off_ramp_bp_monthly"))
+    on = _fmt_money(row.get("ramp_bp_l30d"))
+    comp = row.get("bp_competitor") or "(unnamed)"
+    comp_str = comp if comp not in ("(unnamed)", None) else "a non-Ramp AP tool"
+    return (
+        f"PLAY: P8 — Competitor AP migration. This account routes {off}/mo "
+        f"in bill pay through {comp_str}, while only running {on}/mo through "
+        f"Ramp. The off-Ramp volume is at least 3× larger than Ramp BP.\n"
+        f"PITCH ANGLE: Lead with a migration pitch, not a feature pitch. "
+        f"They've already built an AP workflow somewhere else. Takeaways "
+        f"should focus on (1) the mechanics of migration (bulk vendor "
+        f"import, ACH/check/card on one platform, existing approval flows "
+        f"preserved), (2) the cashback math — at {off}/mo in BP, switching "
+        f"to card-payable via Ramp unlocks 0.15% = meaningful annual "
+        f"savings, (3) consolidation — one login for card + BP + reporting. "
+        f"If the competitor is named ({comp}), reference the specific "
+        f"integration risk or pain point. Close with a 30-min migration "
+        f"scoping call."
+    )
+
+
+def _p8_synth(row: dict) -> dict:
+    return {"product": "Bill Pay", "type": "Migration - Bill Pay",
+            "stage": "S0", "monthly_amount": row.get("off_ramp_bp_monthly") or 0,
+            "next_step": "",
+            "expansion_notes": f"Competitor AP migration: ${int(row.get('off_ramp_bp_monthly') or 0):,}/mo off-Ramp",
+            "est_cp": row.get("est_bp_cp_monthly") or 0}
+
+
+# ── P11: Intl-heavy enterprise (Wise-onboarded) ─────────────────────────────
+def _p11_context(row: dict) -> str:
+    users = int(row.get("user_count") or 0)
+    wise = row.get("wise_onboarded_at") or "some time ago"
+    country = row.get("business_office_country") or "the US"
+    return (
+        f"PLAY: P11 — Intl-heavy enterprise. This account has {users} users, "
+        f"is HQ'd in {country}, and was onboarded to Wise for international "
+        f"payments on {wise} — meaning they're already sending intl payments "
+        f"at scale.\n"
+        f"PITCH ANGLE: Lead Takeaways with the specific Plus features that "
+        f"matter for teams running intl operations: per-entity controls "
+        f"(separate policies per geography), SAML SSO/SCIM for large user "
+        f"counts, advanced policies for multi-currency spend, granular "
+        f"reporting by entity/country, and dedicated support for enterprise "
+        f"implementations. Reference their {users} users as evidence they're "
+        f"at the scale where Plus's admin features pay back immediately. "
+        f"Close with a Plus/multi-entity walk-through (30-min)."
+    )
+
+
+def _p11_synth(row: dict) -> dict:
+    return {"product": "Plus", "type": "Prospecting - Plus (Intl)",
+            "stage": "S0", "monthly_amount": 0, "next_step": "",
+            "expansion_notes": f"{int(row.get('user_count') or 0)} users, Wise-onboarded {row.get('wise_onboarded_at', '?')}",
+            "est_cp": row.get("est_card_cp_monthly") or 0}
+
+
+# ── P12: Treasury opp (GLA >$5M, not on Treasury) ───────────────────────────
+def _p12_context(row: dict) -> str:
+    gla = _fmt_money(row.get("current_gla"))
+    monthly_yield = _fmt_money(row.get("implied_monthly_yield_at_4_5pct"))
+    bp = _fmt_money(row.get("bp_l30d"))
+    return (
+        f"PLAY: P12 — Treasury opp. This account holds {gla} in connected "
+        f"bank accounts, currently earning 0% (not on Ramp Treasury). At a "
+        f"4.5% yield, that's ~{monthly_yield}/mo in recovered revenue. "
+        f"Monthly BP: {bp} — they have active cash flow too.\n"
+        f"PITCH ANGLE: Lead Takeaways with the specific yield math — name "
+        f"the dollar figure their idle cash is leaving on the table. Pair "
+        f"it with Treasury's no-lockup liquidity (same-day transfers, "
+        f"FDIC-pass-through, same interface as their existing Ramp). "
+        f"Address likely objections proactively: 'no lockup', 'move what "
+        f"you want, when you want, no minimums', 'FDIC-backed'. For "
+        f"accounts with heavy BP, call out the operational win of "
+        f"consolidating AP + yield in one platform. Close with a 15-min "
+        f"Treasury onboarding walk-through."
+    )
+
+
+def _p12_synth(row: dict) -> dict:
+    return {"product": "Treasury", "type": "Prospecting - Treasury",
+            "stage": "S0", "monthly_amount": 0, "next_step": "",
+            "expansion_notes": f"GLA ${int(row.get('current_gla') or 0):,} idle, not on Treasury",
+            "est_cp": 0}
+
+
 PLAY_HOOKS = {
     "P1":  {"context_fn": _p1_context,  "synth_fn": _p1_synth,  "pitched_product": "Plus"},
+    "P2":  {"context_fn": _p2_context,  "synth_fn": _p2_synth,  "pitched_product": "Plus"},
     "P5":  {"context_fn": _p5_context,  "synth_fn": _p5_synth,  "pitched_product": "Procurement"},
+    "P6":  {"context_fn": _p6_context,  "synth_fn": _p6_synth,  "pitched_product": "Procurement"},
     "P7":  {"context_fn": _p7_context,  "synth_fn": _p7_synth,  "pitched_product": "Bill Pay"},
-    "P9":  {"context_fn": _p9_context,  "synth_fn": _p9_synth,  "pitched_product": None},   # derived from row
-    "P13": {"context_fn": _p13_context, "synth_fn": _p13_synth, "pitched_product": None},   # derived from row
+    "P8":  {"context_fn": _p8_context,  "synth_fn": _p8_synth,  "pitched_product": "Bill Pay"},
+    "P9":  {"context_fn": _p9_context,  "synth_fn": _p9_synth,  "pitched_product": None},  # derived from row
+    "P11": {"context_fn": _p11_context, "synth_fn": _p11_synth, "pitched_product": "Plus"},
+    "P12": {"context_fn": _p12_context, "synth_fn": _p12_synth, "pitched_product": "Treasury"},
+    "P13": {"context_fn": _p13_context, "synth_fn": _p13_synth, "pitched_product": None},  # derived from row
 }
 
 

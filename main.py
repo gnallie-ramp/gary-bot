@@ -320,6 +320,16 @@ def _start_scheduler():
         name="Plays Refresh",
     )
 
+    # Play discovery: Weekly Monday 7 AM PT — scans #gam-ask-ai for Ramp
+    # Research queries asked 2+ times, DMs a candidate-plays digest.
+    from jobs.discover_plays import run_play_discovery
+    scheduler.add_job(
+        _wrap(run_play_discovery),
+        CronTrigger(day_of_week="mon", hour=7, minute=0),
+        id="play_discovery",
+        name="Play Discovery",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(
