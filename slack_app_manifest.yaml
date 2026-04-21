@@ -83,6 +83,13 @@ features:
       description: Quick-create pre-filled SF opp
       usage_hint: "[account] [product] [amount]"
       should_escape: false
+    - command: /gary-reengage
+      description: Draft unified re-engage email for an account
+      usage_hint: "[account name]"
+      should_escape: false
+    - command: /gary-refresh-help
+      description: Scrape Enablement Eddy's help-article links from #gam-ask-ai
+      should_escape: false
 oauth_config:
   scopes:
     bot:

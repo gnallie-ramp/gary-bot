@@ -158,7 +158,9 @@ If it fails with "Permission denied", the user's GitHub account may not have acc
 
 Now you need to help the user create their Slack app using the manifest from the repo.
 
-First, read the manifest file at ~/gary-bot/slack_app_manifest.yaml. Using the COMMAND_PREFIX the user provided in Phase 1, find-and-replace "gary" with their prefix in ALL the slash command names (e.g. /gary-lookup becomes /jane-lookup if prefix is "jane"). Also replace the "name" and "display_name" fields with something unique like "<FirstName>'s Sales Bot".
+First, read the manifest file at ~/gary-bot/slack_app_manifest.yaml. It should contain 24 slash commands (including /gary-reengage and /gary-refresh-help). If you see fewer, the manifest is stale — tell the user to run `git pull` in ~/gary-bot and re-read it before continuing.
+
+Using the COMMAND_PREFIX the user provided in Phase 1, find-and-replace "gary" with their prefix in ALL the slash command names (e.g. /gary-lookup becomes /jane-lookup if prefix is "jane"). Also replace the "name" and "display_name" fields with something unique like "<FirstName>'s Sales Bot".
 
 Write the modified manifest to a temporary file at ~/gary-bot/my_manifest.yaml.
 
@@ -184,7 +186,7 @@ After the user confirms the tokens, tell them:
 
 "Now invite your bot to the Slack channels it monitors. For each channel below, open it in Slack and type `/invite @YourBotName` (using whatever name you gave your bot)."
 
-List ALL 8 channels clearly:
+List ALL 8 required channels clearly:
 1. #alerts-card-payable-bills
 2. #alerts-self-serve-procurement-trials
 3. #alerts-pclip-activations
@@ -194,7 +196,10 @@ List ALL 8 channels clearly:
 7. #alerts-rclip-requests
 8. #am-escalations
 
-Tell the user: "The bot will only process alerts tagged to you (via the 'Account Manager: @you' line in each alert), so it's safe to share these channels with other bot instances. Let me know when you've added the bot to all 8 channels."
+And one OPTIONAL channel:
+9. #gam-ask-ai (only needed if they want `/<prefix>-refresh-help` to work — it scrapes Enablement Eddy's help-article links for use in auto-drafted emails)
+
+Tell the user: "The bot will only process alerts tagged to you (via the 'Account Manager: @you' line in each alert), so it's safe to share these channels with other bot instances. Let me know when you've added the bot to the alert channels (and optionally #gam-ask-ai)."
 
 Wait for the user to confirm before continuing.
 
@@ -290,6 +295,14 @@ Run this command so that Glass (this app) also has direct Gong access for testin
 
 Tell the user: "I've registered the Gong MCP with Glass. If a browser window opens for Gong auth, select 'Ramp' and authorize. This gives me (Glass) direct access to help you troubleshoot Gong issues later."
 
+## Phase 8c: Salesforce writes via Growth MCP
+
+Gary Bot uses Ramp's Growth MCP (growth-mcp-remote.ramp.builders/mcp) to create and update Salesforce opportunities — this powers the Pipeline tab's "Propose SFDC Updates" button and the post-meeting "Create Opp" flow.
+
+The bot loads Growth MCP credentials from Project Glass first (~/.project-glass/credentials.json), with a fallback to per-user tokens at ~/.gary_bot_tokens/<slack_id>/growth_tokens.json. Since the user installed Glass in Step 1d, this should work automatically without any additional auth.
+
+No action needed from the user in this phase — just tell them: "Salesforce writes go through Ramp's Growth MCP, using your Glass credentials. If you later see 'Growth MCP auth failed' in the bot logs, ask Glass to re-authenticate Growth MCP."
+
 ## Phase 9: Set up auto-start on login (launchd)
 
 Run: mkdir -p ~/Library/LaunchAgents
@@ -313,7 +326,7 @@ Load it: launchctl load ~/Library/LaunchAgents/com.gary-bot.plist
 Wait 10 seconds, then check the log:
   tail -30 ~/.gary_bot_stdout.log
 
-You should see "Scheduler started" and "Snowflake connection OK". If you see errors, read them carefully — common issues:
+You should see "Scheduler started with 28 jobs" and "Snowflake connection OK". If you see errors, read them carefully — common issues:
 - "No module named X" → pip install wasn't complete, re-run Phase 5
 - "Invalid token" → Slack tokens are wrong, re-check .env
 - "OWNER_NAME not found" → Name doesn't match Salesforce exactly
@@ -329,7 +342,11 @@ Tell the user setup is complete. Give them this checklist to verify:
 **Verification checklist:**
 - [ ] Open the bot's Home tab in Slack — you should see your account data loading
 - [ ] DM the bot "status" — should show a health check with integration statuses
+- [ ] Home tab → **Pipeline** tab loads account-grain cards with AI deal-context summaries (may show "Generating AI summaries" banner on first open)
+- [ ] Home tab → **Prospecting** tab shows a :test_tube: **Plays** section at the top with 5 signal plays (P1/P5/P7/P9/P13)
 - [ ] Try your first slash command: /<prefix>-priorities
+- [ ] Try the unified re-engage drafter: /<prefix>-reengage <account name>
+- [ ] (Optional, only if #gam-ask-ai added) Try: /<prefix>-refresh-help — pulls help-article links from Enablement Eddy
 - [ ] Wait for your next meeting to end — the bot should auto-draft a follow-up email
 - [ ] Check that alert channels are working: the next time an alert mentions you as AM, the bot should DM you with a draft
 
@@ -348,7 +365,7 @@ After setup completes, test each integration:
 
 | Test | How | Expected Result |
 |------|-----|----------------|
-| **Bot running** | Check log: `tail -20 ~/.gary_bot_stdout.log` | "Scheduler started with 26 jobs" |
+| **Bot running** | Check log: `tail -20 ~/.gary_bot_stdout.log` | "Scheduler started with 28 jobs" |
 | **Slack connected** | Open your bot's **Home tab** in Slack | Header + quota snapshot + priority alerts |
 | **Snowflake** | `snow sql --query "SELECT CURRENT_USER()" --format json --silent` | Your email address |
 | **Salesforce** | DM your bot: `status` and check Salesforce line | Shows "Connected" |
