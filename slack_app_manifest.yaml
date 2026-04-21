@@ -90,6 +90,10 @@ features:
     - command: /gary-refresh-help
       description: Scrape Enablement Eddy's help-article links from #gam-ask-ai
       should_escape: false
+    - command: /gary-team-cp
+      description: Team CP leaderboard + your top deals over the last N days
+      usage_hint: "[days, default 180]"
+      should_escape: false
 oauth_config:
   scopes:
     bot:

@@ -946,6 +946,86 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
+    @app.command(cmd("team-cp"))
+    def handle_gary_team_cp(ack, command, client, respond):
+        """Team-wide realized CP leaderboard over the last N days (default 180).
+
+        Pulls from dim_sfdc_opportunities + agg_sfdc_expansion_opportunity_spend
+        (READER-accessible). Computes realized CP = max(0, post_30d - pre_30d)
+        × NTR per product, aggregated per rep. Matches Looker's 'Growth AM
+        IC Detailed Metrics' scope (Sales - AM - Growth role).
+
+        Usage: /{prefix}-team-cp [30|60|90|180|365]  (days; defaults to 180)
+        """
+        ack()
+        user = _check_user(command, respond)
+        if not user:
+            return
+
+        text = (command.get("text") or "").strip()
+        try:
+            lookback_days = int(text) if text else 180
+        except ValueError:
+            respond(f"Usage: `/{pfx}-team-cp [days]` (e.g. `/{pfx}-team-cp 90`). Got: `{text}`")
+            return
+        lookback_days = max(7, min(lookback_days, 365))
+
+        respond(f":chart_with_upwards_trend: Pulling team CP leaderboard (last {lookback_days} days)…")
+
+        def _run():
+            try:
+                from core.snowflake_client import run_query
+                from queries.team_cp import TEAM_CP_LEADERBOARD_QUERY
+                df = run_query(TEAM_CP_LEADERBOARD_QUERY.format(lookback_days=lookback_days))
+                if df.empty:
+                    client.chat_postMessage(channel=command["user_id"],
+                        text=":warning: No CW opps found in that window.")
+                    return
+
+                me_sf_name = user.get("sf_owner_name", "")
+                # Build formatted leaderboard message
+                lines = [f"*:trophy: Team CP Leaderboard — last {lookback_days} days*",
+                         "_Realized CP = max(0, post-close 30d spend − pre-close 30d spend) × NTR. Matches Looker Detailed Metrics scope._\n"]
+                for i, row in df.reset_index(drop=True).iterrows():
+                    rank = i + 1
+                    owner = row["owner"] or "?"
+                    total = int(row.get("total_realized_cp") or 0)
+                    card = int(row.get("card_cp") or 0)
+                    bp = int(row.get("bp_cp") or 0)
+                    deals = int(row.get("deals") or 0)
+                    marker = " :star:" if owner == me_sf_name else ""
+                    lines.append(
+                        f"`{rank:>2}.` *{owner}*{marker} — ${total:,} CP  "
+                        f"_(Card ${card:,} · BP ${bp:,} · {deals} deals)_"
+                    )
+
+                # Also include my personal top 5 deals inline for quick context
+                try:
+                    from queries.team_cp import TOP_DEALS_QUERY
+                    my_deals = run_query(TOP_DEALS_QUERY.format(
+                        lookback_days=lookback_days,
+                        owner_name=me_sf_name.replace("'", "''"),
+                        top_n=5,
+                    ))
+                    if not my_deals.empty:
+                        lines.append(f"\n*:medal: Your top {len(my_deals)} deals ({lookback_days}d):*")
+                        for _, r in my_deals.iterrows():
+                            cp = int(r.get("realized_cp") or 0)
+                            prod = r.get("product", "?")
+                            acct = (r.get("opportunity_name") or "")[:60]
+                            cw_date = r.get("cw_date")
+                            lines.append(f"• ${cp:,} CP · {prod} · *{acct}* (CW {cw_date})")
+                except Exception as e:
+                    logger.debug("Personal top deals failed: %s", e)
+
+                client.chat_postMessage(channel=command["user_id"], text="\n".join(lines))
+            except Exception as e:
+                logger.error("team-cp command failed: %s", e, exc_info=True)
+                client.chat_postMessage(channel=command["user_id"],
+                    text=f":warning: Team CP query failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
     @app.command(cmd("opp"))
     def handle_opp(ack, command, client, respond):
         """Quick opp creation: /opp <account> <product> <amount> [| next step | notes]
