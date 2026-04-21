@@ -145,9 +145,9 @@ def procurement_trial_email(
     body = f"""\
 <p>{greeting}</p>
 
-<p>I noticed your Procurement trial was just activated -- congrats! Procurement
-is one of the highest-impact products on the Ramp platform and I want to make
-sure you get the most out of your trial period.</p>
+<p>Congrats on getting started with Procurement! It's one of the highest-impact
+products on the Ramp platform and I want to make sure you get the most out of
+your trial period.</p>
 
 <p>Here are <b>3 priorities</b> to focus on to get the most value out of your trial:</p>
 
@@ -175,6 +175,51 @@ to book time directly on my calendar here:
   <li style="margin-bottom:6px;"><a href="https://support.ramp.com/hc/en-us/articles/49355243914387-Ramp-Procurement-Quick-Start-Guide" style="color:#1155CC;">Quick Start Guide</a></li>
   <li style="margin-bottom:6px;"><a href="https://support.ramp.com/hc/en-us/articles/49437597525907-Procurement-Implementation-Best-Practices-Guide" style="color:#1155CC;">Best Practices</a></li>
 </ul>
+
+<p>Best,<br>{_name}</p>"""
+
+    return _wrap(body, _sig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2b. Top-CP Re-engage (high-CP accounts from book)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def top_cp_reengage_email(
+    greeting: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+) -> str:
+    """Draft for re-engaging a high-CP account we haven't fully captured yet.
+    Mirrors the procurement trial tone: enthusiastic, 3 priorities, booking CTA.
+    """
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+
+    body = f"""\
+<p>{greeting}</p>
+
+<p>Wanted to reach out — your account is one of the highest-potential in my book
+and I want to make sure you're getting everything out of the Ramp platform as
+you continue to grow.</p>
+
+<p>Here are <b>3 areas</b> I'd love to dig into with you:</p>
+
+<ol style="padding-left:20px;">
+  <li style="margin-bottom:8px;"><b>Activating unused products</b> — Bill Pay,
+  Treasury, Travel, and Procurement all multiply your Ramp ROI when layered
+  on top of card. Quick audit of what's live vs. what's available would surface
+  opportunities fast.</li>
+  <li style="margin-bottom:8px;"><b>Scaling the products you're already using</b>
+  — If any existing programs are hitting limits, running into approval bottlenecks,
+  or not yet deployed to every team/entity that could benefit, I can help unblock.</li>
+  <li style="margin-bottom:8px;"><b>Roadmap alignment</b> — What's changing on your
+  side over the next 1-2 quarters (headcount, entities, systems, spend categories).
+  Makes sure the structure we have in Ramp keeps pace.</li>
+</ol>
+
+<p>Happy to walk through any of these on a quick call — book directly here:
+<a href="{_booking}" style="color:#1155CC;">{_booking}</a></p>
 
 <p>Best,<br>{_name}</p>"""
 
@@ -241,9 +286,9 @@ def large_decline_case_a_email(
     body = f"""\
 <p>Hi {first_name},</p>
 
-<p>I noticed a transaction for <b>{amount_formatted}</b> to <b>{vendor_name}</b>
-was recently declined due to a velocity limit on the card. I want to help get
-this resolved quickly so the payment can go through.</p>
+<p>Wanted to reach out — a payment for <b>{amount_formatted}</b> to <b>{vendor_name}</b>
+was recently declined due to a card limit. I want to help get this resolved
+quickly so the payment can go through.</p>
 
 <p>Here are <b>3 options</b> to fix this:</p>
 
@@ -324,8 +369,8 @@ def large_decline_case_b_email(
     body = f"""\
 <p>Hi {first_name},</p>
 
-<p>I noticed a transaction for <b>{amount_formatted}</b> to <b>{vendor_name}</b>
-was recently declined because it exceeded the available balance on the card.
+<p>Wanted to reach out — a payment for <b>{amount_formatted}</b> to <b>{vendor_name}</b>
+was recently declined because it exceeded the available card balance.
 Your current available limit is <b>{available_limit_formatted}</b>. I'd like
 to help get this sorted out.</p>
 
@@ -477,5 +522,104 @@ this link</a> and we'll chat through it?</p>
 <p>Thanks!</p>
 
 <p>{_name}</p>"""
+
+    return _wrap(body, _sig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. Procurement Trial Intro (Trials Tab)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def procurement_trial_intro_email(
+    first_name: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+    trial_end: Optional[str] = None,
+) -> str:
+    """Fixed template for procurement trial outreach from the Trials tab."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+    _end = trial_end or "soon"
+
+    body = f"""\
+<p>Hi {first_name} and team, great to meet you! I was recently assigned as your \
+Account Manager and wanted to reach out and make an intro.</p>
+
+<p>I noticed your Procurement trial ends on {_end} and wanted to offer myself as a \
+resource to make sure you're set up to get real value out of it before it wraps up. \
+We can also discuss discounted pricing if you want to move forward with the upgrade.</p>
+
+<p>Here are some things we can cover:</p>
+
+<ul>
+<li><b>Setting up your first spend program</b> — customize intake forms and approval \
+workflows that issue purchase orders or simple approvals \
+(<a href="https://support.ramp.com/hc/en-us/articles/37424276359443-Get-started-with-Procurement" \
+style="color:#1155CC;">getting started guide</a>)</li>
+<li><b>Invoice-to-PO matching</b> — this is usually the lightbulb moment. Ramp \
+auto-matches invoices to POs so you're not reconciling manually</li>
+<li><b>Paying down POs</b> — POs can be paid with matched card transactions or \
+bills, giving you full visibility into committed vs. actual spend</li>
+<li><b>Configuring workflows</b> — approval routing, intake forms, and PO rules \
+(<a href="https://support.ramp.com/hc/en-us/articles/40754114270867-Configuring-Procurement-Workflows" \
+style="color:#1155CC;">workflow setup guide</a>)</li>
+</ul>
+
+<p>Do you have some time this week or next? Feel free to grab any available time \
+through my <a href="{_booking}" style="color:#1155CC;">calendar</a> or let me know \
+if you have any immediate questions.</p>
+
+<p>Best,<br>{_name}</p>"""
+
+    return _wrap(body, _sig)
+
+
+def plus_trial_intro_email(
+    first_name: str,
+    user_id: Optional[str] = None,
+    booking_link: Optional[str] = None,
+    owner_name: Optional[str] = None,
+    trial_end: Optional[str] = None,
+) -> str:
+    """Fixed template for Plus trial outreach from the Trials tab."""
+    _booking, _name, _sig = _resolve_user_params(user_id, booking_link, owner_name)
+    _end = trial_end or "soon"
+
+    body = f"""\
+<p>Hi {first_name} and team, great to meet you! I was recently assigned as your \
+Account Manager and wanted to reach out and make an intro.</p>
+
+<p>I noticed your Plus trial ends on {_end} and wanted to offer myself as a resource \
+to make sure you're getting the most out of it before it wraps up. We can also \
+discuss discounted pricing if you want to move forward with the upgrade.</p>
+
+<p>Here are some things we can cover:</p>
+
+<ul>
+<li><b>Advanced approval workflows</b> — multi-level approvals, conditional routing, \
+and auto-approvals by spend category so nothing slips through the cracks</li>
+<li><b>Custom accounting rules</b> — auto-code transactions to the right GL, \
+department, and class without manual reclassification</li>
+<li><b>Enhanced reporting &amp; budgets</b> — real-time spend visibility by team, \
+vendor, or category with proactive budget alerts</li>
+<li><b>Procurement</b> — intake forms, purchase orders, and invoice matching to \
+control spend before it happens</li>
+<li><b>AI agents</b> — Plus includes \
+<a href="https://support.ramp.com/hc/en-us/articles/45051740591251-Ramp-Accounting-Agent-Enablement-Daily-Use-Admin-guide" \
+style="color:#1155CC;">Accounting Agent</a> for auto-coding and close automation, \
+<a href="https://support.ramp.com/hc/en-us/articles/44072387128979-Policy-Agent-Overview" \
+style="color:#1155CC;">Policy Agent</a> for real-time spend policy enforcement, and \
+<a href="https://support.ramp.com/hc/en-us/articles/47024360747027-AP-Agents-available-in-Ramp-Bill-Pay" \
+style="color:#1155CC;">AP Agents</a> for bill pay automation</li>
+</ul>
+
+<p>You can also check out the <a href="https://ramp.com/pricing" \
+style="color:#1155CC;">full list of Plus features</a> to see what's included.</p>
+
+<p>Do you have some time this week or next? Feel free to grab any available time \
+through my <a href="{_booking}" style="color:#1155CC;">calendar</a> or let me know \
+if you have any immediate questions.</p>
+
+<p>Best,<br>{_name}</p>"""
 
     return _wrap(body, _sig)

@@ -74,28 +74,21 @@ def _generate_reengage_email(opp_row, contact_name, sfdc_notes, email_comms, own
 
     first_name = contact_name.split()[0] if contact_name else ""
 
-    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, re-engage a stalled expansion opportunity.
+    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, re-engage a customer and get back on the calendar.
 
 Account: {acct_name}
 Product: {product}
-Stage: {stage}
 Days since last contact: {days_stale}
 Primary contact: {contact_name}
-Last contact type: {last_email_dir if last_email_dir else 'call'}
-Last email subject: {last_subj if last_subj else 'N/A'}
-
-Opp context:
-- Created: {created_date}
 
 Spend context:
-- Baseline spend: ${baseline:,.0f}/month
 - Recent 30d spend: ${recent:,.0f}/month
 - Status: {act_status}
 
 SFDC Account Notes:
 {sfdc_notes if sfdc_notes else 'No notes on file'}
 
-Recent Email History (Outreach/SFDC-logged — shows what {owner_first_name or owner_name} has already sent):
+Recent Email History:
 {email_comms if email_comms else 'No recent emails'}
 
 Last call summary:
@@ -104,18 +97,36 @@ Last call summary:
 Product requests from last call:
 {prod_req if prod_req else 'None'}
 
-Write a short re-engagement email from {owner_first_name or owner_name} to the customer. Rules:
-- Address the contact by first name ({first_name if first_name else 'use generic greeting'})
-- Reference the most recent call or email context to show continuity — USE THE ACTUAL EMAIL/CALL CONTENT ABOVE, don't be generic
-- If the customer replied with interest or a specific question in recent emails, pick up that thread
-- If AM notes mention specific next steps or context, weave that in naturally
-- Under 120 words
-- Acknowledge the time gap naturally
-- One clear, low-friction ask (15-minute call, quick question, etc.)
-- Tone: warm, direct, peer-to-peer — not salesy
-- DO NOT use bullet points
-- DO NOT use subject line — return body only
-- Sign off as "{owner_first_name or owner_name}" """
+Write a re-engagement email from {owner_first_name or owner_name} to {first_name if first_name else 'the contact'}. Structure the body in 4 explicit sections matching Ramp's Revenue Agent format. Use <strong> for section headers and <ul><li> for bullets — HTML only, no markdown.
+
+<strong>Takeaways</strong>
+<ul>
+  <li>3-5 bullets pairing a specific thing they said or a real signal from SFDC (dollar amount, vendor, timeline, product request) with the Ramp capability that addresses it. Cite exact details from the call summary or email history — never generic.</li>
+</ul>
+
+<strong>{first_name or 'Their'}'s Next Steps</strong>
+<ul>
+  <li>2-3 bullets, 2nd person, what the CUSTOMER owns. Pick up any unfinished next step from AM notes / last call.</li>
+</ul>
+
+<strong>{owner_first_name or owner_name}'s Next Steps</strong>
+<ul>
+  <li>1-2 bullets, 1st person, what YOU own. Last bullet MUST be a specific deeper-dive ask with a 2-day time window. "I'll schedule a 15-min working session next Tuesday or Wednesday — what times work?"</li>
+</ul>
+
+After the 3 sections add one line before the signature:
+  <p>Book a call: <a href="{booking_link if 'booking_link' in dir() else ''}">{booking_link if 'booking_link' in dir() else ''}</a></p>
+
+HARD RULES:
+- Address by first name ({first_name if first_name else 'generic greeting'})
+- Acknowledge the time gap naturally (don't apologize, just own it)
+- Every Takeaway fact must be traceable to the SFDC notes, call summary, or email history provided. NEVER invent.
+- Do NOT guilt-trip about unanswered emails
+- Do NOT say "I was notified" / anything implying an automated alert
+- Do NOT use markdown. HTML tags only: <strong>, <ul>, <li>, <a>, <br>, <p>
+- 200-350 words total
+- Sign off as "{owner_first_name or owner_name}" on the last line before the Book a call line.
+"""
 
     return call_claude(prompt, max_tokens=512)
 
@@ -167,43 +178,31 @@ def run_stale_opp_drafter(client, user_id=None):
             account_id = row.get("account_id", "")
             product = row.get("expansion_subtype", "")
 
-            # Find best contact + CC anyone with prior comms
+            # Find best contact + CC stakeholders using shared scoring
+            from utils.contact_scoring import select_recipients
             acct_contacts = contacts_by_account.get(account_id, [])
-            contact_email = ""
-            contact_name = ""
-            cc_emails = []
 
-            # Build set of emails with prior engagement (email or Gong)
-            engaged_emails = set()
+            # Build engagement signals for scoring
+            email_correspondents = set()
             for e in emails_by_account.get(account_id, []):
                 ext = (str(e.get("external_contact_email", "") or "")).strip().lower()
                 if ext and "@" in ext:
-                    engaged_emails.add(ext)
+                    email_correspondents.add(ext)
 
-            valid_contacts = [
-                c for c in acct_contacts
-                if c.get("email") and not is_hash_like(c.get("name", ""))
-            ]
+            primary, cc_contacts = select_recipients(
+                acct_contacts,
+                gong_participants=None,  # Gong data not available in batch context
+                email_correspondents=email_correspondents,
+                max_cc=3,
+            )
 
-            for c in valid_contacts:
-                if not contact_email:
-                    contact_email = c["email"]
-                    contact_name = c.get("name", "")
-                else:
-                    em = c["email"].lower()
-                    if em in engaged_emails and em != contact_email.lower():
-                        cc_emails.append(c["email"])
-            # Domain-match guard: only CC contacts whose domain matches TO
-            to_domain = contact_email.lower().split("@")[-1] if "@" in contact_email else ""
-            cc_emails = [
-                e for e in cc_emails
-                if not to_domain or e.lower().split("@")[-1] == to_domain
-            ]
-            cc_string = ", ".join(cc_emails[:3])
-
-            if not contact_email:
+            if not primary:
                 logger.info("Skipping %s — no contact email found", acct_name)
                 continue
+
+            contact_email = primary["email"]
+            contact_name = primary.get("name", "")
+            cc_string = ", ".join(c["email"] for c in cc_contacts)
 
             # Build context from SFDC notes and emails
             sfdc_notes = _build_notes_text(notes_by_account.get(account_id))

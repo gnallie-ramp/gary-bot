@@ -88,3 +88,94 @@ def get_snoozed_opps(user_id: str = "") -> dict:
                 data.pop(oid, None)
             _save(data)
     return active
+
+
+# ── Account-level snoozes (keyed by account_id; stored in same file with "acct:" prefix) ──
+
+def _account_key(account_id: str) -> str:
+    return f"acct:{account_id}"
+
+
+def snooze_account(account_id: str, days: int = 30, user_id: str = "") -> None:
+    """Snooze an account (by SFDC ID) for `days` days. Used by Top-CP Re-engage."""
+    with _lock:
+        data = _load()
+        data[_account_key(account_id)] = {
+            "until": time.time() + days * 86400,
+            "user_id": user_id,
+            "snoozed_at": time.time(),
+            "kind": "account",
+        }
+        _save(data)
+    logger.info("Snoozed account %s for %dd (user=%s)", account_id, days, user_id)
+
+
+def is_account_snoozed(account_id: str, user_id: str = "") -> bool:
+    """Check if an account is currently snoozed for this user (or globally if no user_id)."""
+    data = _load()
+    entry = data.get(_account_key(account_id))
+    if not entry:
+        return False
+    if time.time() > entry["until"]:
+        with _lock:
+            data = _load()
+            data.pop(_account_key(account_id), None)
+            _save(data)
+        return False
+    if user_id and entry.get("user_id") and entry.get("user_id") != user_id:
+        return False
+    return True
+
+
+def get_snoozed_accounts(user_id: str = "") -> set:
+    """Return set of account_ids currently snoozed for this user."""
+    data = _load()
+    now = time.time()
+    active = set()
+    for key, entry in data.items():
+        if not key.startswith("acct:"):
+            continue
+        if now > entry["until"]:
+            continue
+        if user_id and entry.get("user_id") and entry.get("user_id") != user_id:
+            continue
+        active.add(key[len("acct:"):])
+    return active
+
+
+# ── Play-specific snoozes (keyed per-play so P1 snooze doesn't hide from P13) ──
+
+def _play_key(play_id: str, account_id: str) -> str:
+    return f"play:{play_id}:{account_id}"
+
+
+def snooze_play_account(play_id: str, account_id: str, days: int = 30, user_id: str = "") -> None:
+    """Snooze an account from a specific play — other plays still show it."""
+    with _lock:
+        data = _load()
+        data[_play_key(play_id, account_id)] = {
+            "until": time.time() + days * 86400,
+            "user_id": user_id,
+            "snoozed_at": time.time(),
+            "kind": "play",
+            "play_id": play_id,
+        }
+        _save(data)
+    logger.info("Snoozed %s from play %s for %dd (user=%s)", account_id, play_id, days, user_id)
+
+
+def get_snoozed_play_accounts(play_id: str, user_id: str = "") -> set:
+    """Return set of account_ids currently snoozed for this specific play."""
+    data = _load()
+    now = time.time()
+    prefix = f"play:{play_id}:"
+    active = set()
+    for key, entry in data.items():
+        if not key.startswith(prefix):
+            continue
+        if now > entry["until"]:
+            continue
+        if user_id and entry.get("user_id") and entry.get("user_id") != user_id:
+            continue
+        active.add(key[len(prefix):])
+    return active

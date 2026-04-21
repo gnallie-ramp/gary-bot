@@ -19,16 +19,16 @@ _PRIORITY_CACHE_TTL = 600  # 10 minutes
 # ── Tab state per user ───────────────────────────────────────────────────────
 _active_tab = {}  # user_id -> tab name
 _TABS = [
-    ("dashboard", ":house: Dashboard"),
-    ("pipeline", ":dart: Pipeline"),
-    ("stale", ":alarm_clock: Stale Opps"),
+    ("signals", ":rotating_light: Signals"),
+    ("pipeline", ":clipboard: Pipeline"),
     ("prospecting", ":mag: Prospecting"),
     ("meetings", ":calendar: Meetings"),
+    ("post_close", ":chart_with_upwards_trend: Post-Close"),
+    ("renewals", ":repeat: Renewals"),
     ("drafts", ":email: Drafts"),
-    ("instructions", ":books: Instructions"),
     ("settings", ":gear: Settings"),
 ]
-_DEFAULT_TAB = "dashboard"
+_DEFAULT_TAB = "signals"
 
 
 def _updated_at_block(epoch=None) -> dict:
@@ -137,6 +137,23 @@ def _build_home_blocks_header(active_tab):
 def _build_home_blocks(client, user_id):
     """Build the Home tab blocks — routes to active tab's builder."""
     active = _active_tab.get(user_id, _DEFAULT_TAB)
+    # Migrate legacy tab names from before consolidation
+    if active == "dashboard":
+        active = "signals"
+        _active_tab[user_id] = active
+    # Legacy "stale" tab folds into Pipeline tab with a Staleness ≥15d filter preset
+    if active == "stale":
+        active = "pipeline"
+        _active_tab[user_id] = active
+        _pipeline_state.setdefault(user_id, _pipeline_default_state())["filters"]["staleness"] = "15+"
+    # Trials folded into Prospecting as a sub-section
+    if active == "trials":
+        active = "prospecting"
+        _active_tab[user_id] = active
+    # Instructions no longer a tab — content available via /gary-help
+    if active == "instructions":
+        active = "signals"
+        _active_tab[user_id] = active
 
     blocks = []
 
@@ -159,16 +176,19 @@ def _build_home_blocks(client, user_id):
 
     # Tab content
     tab_builders = {
-        "dashboard": _build_dashboard_tab,
+        "signals": _build_signals_tab,
         "pipeline": _build_pipeline_tab,
-        "stale": _build_stale_tab,
+        "stale": _build_stale_tab,  # kept for direct callers; tab bar no longer surfaces it
         "prospecting": _build_prospecting_tab,
         "meetings": _build_meetings_tab,
+        "post_close": _build_post_close_tab,
+        "renewals": _build_renewals_tab,
+        "trials": _build_trials_tab,
         "drafts": _build_drafts_tab,
         "instructions": _build_instructions_tab,
         "settings": _build_settings_tab,
     }
-    builder = tab_builders.get(active, _build_dashboard_tab)
+    builder = tab_builders.get(active, _build_signals_tab)
     tab_blocks = builder(client, user_id)
     blocks.extend(tab_blocks)
 
@@ -176,7 +196,11 @@ def _build_home_blocks(client, user_id):
     blocks.append({"type": "divider"})
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": "Gary Bot v2 • Built with Claude Code • DM me anything or use a slash command"}],
+        "elements": [{"type": "mrkdwn", "text": (
+            f"Gary Bot v2 • Built with Claude Code • "
+            f"`/{COMMAND_PREFIX}-help` for all commands • "
+            f"DM me anything"
+        )}],
     })
 
     # Slack 100-block limit safety
@@ -191,11 +215,11 @@ def _build_home_blocks(client, user_id):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB: Dashboard
+# TAB: Signals (unified — replaces Dashboard + Pipeline)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_dashboard_tab(client, user_id):
-    """Dashboard: Quota snapshot + priority alerts summary + quick actions."""
+def _build_signals_tab(client, user_id):
+    """Signals: Unified feed with quota, spend signals, non-spend signals, activations, and quick actions."""
     blocks = []
 
     # Quota Snapshot
@@ -204,24 +228,31 @@ def _build_dashboard_tab(client, user_id):
         blocks.extend(quota_blocks)
         blocks.append({"type": "divider"})
 
-    # Priority Alerts (condensed — first 3 groups, 3 per group)
-    alert_blocks = _get_priority_alerts(user_id, max_per_group=3, max_groups=4)
+    # Spend Signals (all groups, full density)
+    alert_blocks = _get_priority_alerts(user_id, max_per_group=5, max_groups=9)
     if alert_blocks:
         blocks.extend(alert_blocks)
         blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
+    else:
         blocks.append({
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "_Switch to the :dart: Pipeline tab for all signals_"}],
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"_No active priority signals right now. Check back later or run_ `/{COMMAND_PREFIX}-priorities`"},
         })
+
+    # Non-spend signals (stale, reopen, post-meeting, underperforming)
+    nonsignal_blocks = _get_non_spend_signals(user_id=user_id)
+    if nonsignal_blocks:
         blocks.append({"type": "divider"})
+        blocks.extend(nonsignal_blocks)
 
     # Activation Alerts (recent treasury, investment, first bill milestones)
     activation_blocks = _get_activation_alerts_section(user_id)
     if activation_blocks:
-        blocks.extend(activation_blocks)
         blocks.append({"type": "divider"})
+        blocks.extend(activation_blocks)
 
     # Quick Actions
+    blocks.append({"type": "divider"})
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": "*:zap: Quick Actions*"},
@@ -249,38 +280,582 @@ def _build_dashboard_tab(client, user_id):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB: Pipeline
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _build_pipeline_tab(client, user_id):
-    """Pipeline: Full priority alerts with all signal groups expanded."""
-    blocks = []
-
-    alert_blocks = _get_priority_alerts(user_id, max_per_group=5, max_groups=8)
-    if alert_blocks:
-        blocks.extend(alert_blocks)
-        blocks.append(_updated_at_block(_priority_cache.get(user_id, {}).get("fetched_at", 0)))
-    else:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"_No active priority signals right now. Check back later or run_ `/{COMMAND_PREFIX}-priorities`"},
-        })
-
-    # Non-spend signals (stale, reopen, post-meeting, underperforming)
-    nonsignal_blocks = _get_non_spend_signals(user_id=user_id)
-    if nonsignal_blocks:
-        blocks.append({"type": "divider"})
-        blocks.extend(nonsignal_blocks)
-
-    return blocks
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # TAB: Stale Opps
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Per-user sort preference for stale tab
 _stale_sort = {}  # user_id -> "cp" | "staleness"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Pipeline — all open opps (Expansion + Renewal) with engagement context,
+# sort/filter/pagination, and per-opp actions. Replaces standalone Stale Opps tab.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_pipeline_state = {}  # user_id -> {"sort": str, "filters": dict, "page": int}
+_pipeline_cache = {}  # user_id -> {"data": DataFrame, "fetched_at": epoch}
+_PIPELINE_CACHE_TTL = 600  # 10 min
+_PIPELINE_PAGE_SIZE = 10
+
+# Per-user per-opp pending SFDC update proposals, cleared after Apply/Dismiss.
+# Shape: {user_id: {opp_id: {"proposals": {...}, "current": {...}, "rationale": str,
+#                            "account_name": str, "product": str, "message_ts": str,
+#                            "channel": str}}}
+_pending_sfdc_updates = {}
+
+_PRODUCT_FILTERS = ["Card", "Bill Pay", "Treasury", "Travel", "SaaS", "SaaS Add-On", "Procurement"]
+_STAGE_FILTERS = ["S1", "S2", "S3", "S4"]
+_TYPE_FILTERS = ["Expansion", "Renewal"]
+_STALENESS_FILTERS = [("all", "All"), ("7+", "≥7d"), ("15+", "≥15d"), ("30+", "≥30d"), ("90+", "≥90d")]
+_SORT_OPTIONS = [
+    ("cp", ":moneybag: CP"),
+    ("touch", ":alarm_clock: Last Touch"),
+    ("close", ":calendar: Close Date"),
+    ("stage", ":chart_with_upwards_trend: Stage"),
+]
+
+
+def _pipeline_default_state():
+    return {
+        "sort": "cp",
+        "filters": {"products": [], "stages": [], "types": [], "staleness": "all"},
+        "page": 1,
+    }
+
+
+def _get_pipeline_state(user_id):
+    if user_id not in _pipeline_state:
+        _pipeline_state[user_id] = _pipeline_default_state()
+    return _pipeline_state[user_id]
+
+
+def _fetch_pipeline_data(user_id):
+    """Fetch all accounts with open opps via ALL_PIPELINE_ACCOUNTS_QUERY, cache 10 min.
+
+    Parses the `opps` JSON array from Snowflake into a Python list so the
+    render/filter code can work with real lists.
+    """
+    import time as _time
+    import json as _json
+    from core.snowflake_client import run_query
+    from queries.queries import ALL_PIPELINE_ACCOUNTS_QUERY, format_query
+
+    now = _time.time()
+    cached = _pipeline_cache.get(user_id)
+    if cached and (now - cached["fetched_at"]) < _PIPELINE_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        df = run_query(format_query(ALL_PIPELINE_ACCOUNTS_QUERY, user_id=user_id))
+        df.columns = [c.lower() for c in df.columns]
+        # Snowflake returns ARRAY_AGG as a JSON string — parse into list[dict]
+        if "opps" in df.columns:
+            df["opps"] = df["opps"].apply(
+                lambda s: _json.loads(s) if isinstance(s, str) else (s or [])
+            )
+        _pipeline_cache[user_id] = {"data": df, "fetched_at": now}
+        return df
+    except Exception as e:
+        logger.warning("Pipeline data fetch failed: %s", e, exc_info=True)
+        return None
+
+
+def _pipeline_sort_key(row, sort_mode):
+    """Account-level sort key. Higher tuple = top of list (we sort desc).
+
+    Account rows have: total_est_cp (sum), soonest_close_date, opps (list).
+    For stage sort we take the MAX stage-rank across the account's opps
+    (further-along deals get priority).
+    """
+    from datetime import date
+    if sort_mode == "cp":
+        return (float(row.get("total_est_cp") or 0),)
+    if sort_mode == "touch":
+        days = row.get("days_since_touch")
+        return (-1 if days is None or str(days) == "nan" else float(days),)
+    if sort_mode == "close":
+        cd = row.get("soonest_close_date")
+        if cd is None:
+            return (0,)
+        try:
+            # Negate so smaller (sooner) close date = higher sort key in desc order
+            return (-(cd - date(1970, 1, 1)).days,)
+        except Exception:
+            return (0,)
+    if sort_mode == "stage":
+        stage_rank = {"S1": 1, "S2": 2, "S3": 3, "S4": 4}
+        opps = row.get("opps") or []
+        max_rank = max(
+            (stage_rank.get((o.get("stage") or "").split(":")[0].strip(), 0) for o in opps),
+            default=0,
+        )
+        return (max_rank, float(row.get("total_est_cp") or 0))
+    return (float(row.get("total_est_cp") or 0),)
+
+
+def _pipeline_apply_filters(df, filters):
+    """Account-level filter: include an account if it has ≥1 opp matching ALL
+    active chip-group constraints (product AND stage AND type), plus staleness.
+    Uses the pipe-delimited string columns for fast membership checks.
+    """
+    import pandas as pd
+    f = df.copy()
+
+    products = filters.get("products") or []
+    if products:
+        def _has_product(pipe_str):
+            tokens = [p.strip() for p in (pipe_str or "").split("|") if p.strip()]
+            return any(p in products for p in tokens)
+        f = f[f["opp_products_pipe"].apply(_has_product)]
+
+    stages = filters.get("stages") or []
+    if stages:
+        def _has_stage(pipe_str):
+            tokens = [(s or "").split(":")[0].strip() for s in (pipe_str or "").split("|")]
+            return any(s in stages for s in tokens)
+        f = f[f["opp_stages_pipe"].apply(_has_stage)]
+
+    types_ = filters.get("types") or []
+    if types_:
+        def _has_type(pipe_str):
+            tokens = [t.strip() for t in (pipe_str or "").split("|") if t.strip()]
+            return any(t in types_ for t in tokens)
+        f = f[f["opp_types_pipe"].apply(_has_type)]
+
+    stale = filters.get("staleness", "all")
+    if stale != "all":
+        days_req = int(stale.rstrip("+"))
+        f = f[f["days_since_touch"].apply(
+            lambda d: d is not None and not pd.isna(d) and float(d) >= days_req
+        )]
+
+    return f
+
+
+def _pipeline_build_filter_row(label, key, options, active_values, include_all=False):
+    """Build a multi-select chip row for filters. Active chips get primary style."""
+    elements = []
+    if include_all:
+        all_active = not active_values
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "All", "emoji": True},
+            "action_id": f"pipeline_filter_{key}_all",
+        }
+        if all_active:
+            btn["style"] = "primary"
+        elements.append(btn)
+    for opt in options:
+        if isinstance(opt, tuple):
+            val, disp = opt
+        else:
+            val, disp = opt, opt
+        active = val in active_values if isinstance(active_values, list) else val == active_values
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": disp, "emoji": True},
+            "action_id": f"pipeline_filter_{key}_{val}".replace(" ", "_"),
+        }
+        if active:
+            btn["style"] = "primary"
+        elements.append(btn)
+    return {"type": "actions", "elements": elements[:25]}  # Slack cap
+
+
+def _pipeline_touch_line(days_since, last_email_direction):
+    """Staleness dot + plain-English line about last touch."""
+    if days_since is None or str(days_since) == "nan":
+        return ":white_circle: No call or email on file"
+    d = int(days_since)
+    if d < 7:
+        dot = ":large_green_circle:"
+    elif d < 15:
+        dot = ":large_yellow_circle:"
+    elif d < 30:
+        dot = ":large_orange_circle:"
+    elif d < 60:
+        dot = ":red_circle:"
+    else:
+        dot = ":red_circle:"  # same red past 30d — depth of red via label
+    base = f"{dot} Last touch: {d}d ago"
+    dirn = (last_email_direction or "").lower()
+    if dirn == "outbound":
+        base += " · _last email sent by you, no reply_"
+    elif dirn == "inbound":
+        base += " · _they replied — your move_"
+    return base
+
+
+def _build_pipeline_tab(client, user_id):
+    """Pipeline: one card per account with open opps, all engagement context
+    consolidated at account level. Sort/filter/paginate across accounts.
+    """
+    import pandas as pd
+    from utils.snooze import is_snoozed
+
+    state = _get_pipeline_state(user_id)
+    blocks = []
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:clipboard: Pipeline — Your Open Opps*"},
+    })
+
+    df = _fetch_pipeline_data(user_id)
+    if df is None:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":warning: Could not load pipeline data. Check logs or retry."},
+        })
+        return blocks
+    if df.empty:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No accounts with open expansion or renewal opps found in your book._"},
+        })
+        return blocks
+
+    total_accounts = len(df)
+    total_opps = int(df["open_opp_count"].sum())
+    # Expansion/renewal counts: sum of opp_types_pipe tokens across all accounts
+    def _count_type_in_pipe(pipe_str, t):
+        return sum(1 for tok in (pipe_str or "").split("|") if tok == t)
+    exp_count = int(df["opp_types_pipe"].apply(lambda s: _count_type_in_pipe(s, "Expansion")).sum())
+    ren_count = int(df["opp_types_pipe"].apply(lambda s: _count_type_in_pipe(s, "Renewal")).sum())
+
+    # Apply filters
+    filtered = _pipeline_apply_filters(df, state["filters"])
+
+    # Apply sort (desc on the chosen key)
+    if not filtered.empty:
+        filtered = filtered.assign(_sortkey=filtered.apply(
+            lambda r: _pipeline_sort_key(r, state["sort"]), axis=1))
+        filtered = filtered.sort_values("_sortkey", ascending=False).drop(columns=["_sortkey"])
+
+    # Filter out snoozed accounts. Snooze key pattern: "acct:<account_id>".
+    before_snooze = len(filtered)
+    filtered = filtered[~filtered["account_id"].apply(
+        lambda aid: is_snoozed(f"acct:{aid}") if aid else False
+    )]
+    snoozed_count = before_snooze - len(filtered)
+
+    total_filtered = len(filtered)
+
+    # Pagination
+    page = state.get("page", 1)
+    total_pages = max(1, (total_filtered + _PIPELINE_PAGE_SIZE - 1) // _PIPELINE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    state["page"] = page
+    start = (page - 1) * _PIPELINE_PAGE_SIZE
+    end = start + _PIPELINE_PAGE_SIZE
+    page_rows = filtered.iloc[start:end]
+
+    # Subtitle with counts
+    subtitle_bits = [
+        f"*{total_accounts}* accounts · *{total_opps}* open opps ({exp_count} Expansion · {ren_count} Renewal)",
+    ]
+    if total_filtered != total_accounts:
+        subtitle_bits.append(f"*{total_filtered}* accounts after filters")
+    if snoozed_count:
+        subtitle_bits.append(f"{snoozed_count} snoozed hidden")
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": " · ".join(subtitle_bits)}],
+    })
+
+    # Sort row
+    sort_elements = []
+    for sort_id, label in _SORT_OPTIONS:
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": label, "emoji": True},
+            "action_id": f"pipeline_sort_{sort_id}",
+        }
+        if state["sort"] == sort_id:
+            btn["style"] = "primary"
+        sort_elements.append(btn)
+    blocks.append({"type": "actions", "elements": sort_elements})
+
+    # Filter rows
+    blocks.append(_pipeline_build_filter_row(
+        "Product", "product", _PRODUCT_FILTERS, state["filters"]["products"]))
+    blocks.append(_pipeline_build_filter_row(
+        "Stage", "stage", _STAGE_FILTERS, state["filters"]["stages"]))
+    blocks.append(_pipeline_build_filter_row(
+        "Type", "type", _TYPE_FILTERS, state["filters"]["types"]))
+    blocks.append(_pipeline_build_filter_row(
+        "Staleness", "staleness", _STALENESS_FILTERS, state["filters"]["staleness"]))
+
+    # Results context
+    showing_from = start + 1 if total_filtered else 0
+    showing_to = min(end, total_filtered)
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn",
+                      "text": f"Showing {showing_from}–{showing_to} of {total_filtered} · page {page}/{total_pages}"}],
+    })
+    blocks.append({"type": "divider"})
+
+    if page_rows.empty:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No accounts match the current filters. Try clearing filters._"},
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Reset filters", "emoji": True},
+                "action_id": "pipeline_reset_filters",
+            }],
+        })
+        return blocks
+
+    # ── AI summary cold-start / staleness: kick off background generation for
+    # any visible account that doesn't have a fresh cached summary. The render
+    # uses the template fallback now; the cards show real summaries on next
+    # refresh (~30s for 10 accounts).
+    try:
+        from jobs.opp_context_summarizer import is_cache_fresh, batch_generate, _generation_in_flight
+        stale_rows = []
+        for _, r in page_rows.iterrows():
+            aid = r.get("account_id")
+            if not aid or aid in _generation_in_flight:
+                continue
+            payload = {
+                "last_call_date": r.get("last_call_date"),
+                "last_email_date": r.get("last_email_date"),
+                "opps": r.get("opps") or [],
+            }
+            if not is_cache_fresh(aid, payload):
+                stale_rows.append(r.to_dict())
+
+        if stale_rows:
+            # Banner telling the user summaries are generating
+            blocks.append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": (
+                    f":sparkles: _Generating AI summaries for {len(stale_rows)} "
+                    f"account{'s' if len(stale_rows) != 1 else ''} in background — "
+                    f"refresh in ~30s to see them._"
+                )}],
+            })
+            # Mark in-flight so concurrent renders don't re-trigger
+            for r in stale_rows:
+                _generation_in_flight.add(r["account_id"])
+
+            def _run_batch():
+                try:
+                    batch_generate(stale_rows)
+                except Exception as e:
+                    logger.warning("Pipeline summary batch failed: %s", e)
+                finally:
+                    for r in stale_rows:
+                        _generation_in_flight.discard(r["account_id"])
+            threading.Thread(target=_run_batch, daemon=True).start()
+    except Exception as e:
+        logger.debug("AI summary batch trigger failed: %s", e)
+
+    # Render account cards (one card per account, listing its open opps inside)
+    for _, row in page_rows.iterrows():
+        blocks.extend(_pipeline_render_card(row))
+
+    # Pagination controls
+    blocks.append({"type": "divider"})
+    page_elements = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":arrow_left: Prev", "emoji": True},
+            "action_id": "pipeline_page_prev",
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Next :arrow_right:", "emoji": True},
+            "action_id": "pipeline_page_next",
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Reset filters", "emoji": True},
+            "action_id": "pipeline_reset_filters",
+        },
+    ]
+    blocks.append({"type": "actions", "elements": page_elements})
+
+    return blocks
+
+
+def _pipeline_render_card(row):
+    """Render a single account with its open opps as nested bullets.
+
+    Blocks: one section with the account header + opp list + engagement context,
+    plus one actions row with account-scoped buttons (Draft, Propose, Snooze, SFDC).
+    """
+    import pandas as pd
+    import json as _json
+
+    acct_name = row.get("account_name") or "Unknown"
+    acct_id = row.get("account_id", "")
+    total_cp = row.get("total_est_cp") or 0
+    open_count = row.get("open_opp_count") or 0
+    soonest_close = row.get("soonest_close_date")
+    opps = row.get("opps") or []
+
+    # Account-level type icon: purple if ANY renewal, else blue
+    has_renewal = any((o.get("type") == "Renewal") for o in opps)
+    has_expansion = any((o.get("type") == "Expansion") for o in opps)
+    if has_renewal and has_expansion:
+        type_icon = ":large_blue_circle:"  # mixed — use blue for primary expansion
+    elif has_renewal:
+        type_icon = ":large_purple_circle:"
+    else:
+        type_icon = ":large_blue_circle:"
+
+    acct_sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+    acct_str = f"<{acct_sf_link}|{acct_name}>" if acct_sf_link else acct_name
+
+    # Header line
+    opp_word = "opp" if open_count == 1 else "opps"
+    header_bits = [f"{type_icon} *{acct_str}* · {open_count} open {opp_word}"]
+    if total_cp and float(total_cp) > 0:
+        header_bits.append(f"Total CP potential: ~{_fmt_currency(float(total_cp))}")
+    if soonest_close is not None and not pd.isna(soonest_close):
+        header_bits.append(f"soonest close: {soonest_close}")
+    header = " · ".join(header_bits)
+
+    # Engagement touch line
+    touch = _pipeline_touch_line(row.get("days_since_touch"), row.get("last_email_direction"))
+    last_email_contact = row.get("last_email_contact") or ""
+    if last_email_contact and row.get("days_since_touch") is not None:
+        touch += f" · _w/ {last_email_contact}_"
+
+    # Per-opp bullet list (compact)
+    opp_lines = ["*Open opps:*"]
+    for opp in opps:
+        raw_product = opp.get("product")
+        opp_type = opp.get("type") or ""
+        # Label: prefer specific product. Fall back to type name (e.g. "Renewal")
+        # when product is null so we don't render an ugly "—".
+        if raw_product:
+            label = f"*{raw_product}*"
+            if opp_type == "Renewal":
+                label += " _Renewal_"
+        else:
+            label = f"*{opp_type}*" if opp_type else "*Unknown*"
+        stage = (opp.get("stage") or "").split(":")[0].strip() or "?"
+        close = opp.get("close_date") or ""
+        monthly = opp.get("monthly_amount") or 0
+        est_cp = opp.get("est_cp") or 0
+        next_step = (opp.get("next_step") or "").strip()
+
+        line_parts = [f"• {label}"]
+        if monthly and float(monthly) > 0:
+            line_parts.append(f"{_fmt_currency(float(monthly))}/mo")
+        line_parts.append(stage)
+        if close:
+            line_parts.append(f"closes {close}")
+        if est_cp and float(est_cp) > 0:
+            line_parts.append(f"~{_fmt_currency(float(est_cp))} CP")
+        opp_line = " · ".join(line_parts)
+        opp_lines.append(opp_line)
+        if next_step and next_step.lower() not in ("none", "null"):
+            ns_display = next_step[:100] + ("…" if len(next_step) > 100 else "")
+            opp_lines.append(f"   └ Next: {ns_display}")
+
+    # Account-level context: prefer AI-synthesized summary (Phase 2a) when
+    # cached, fall back to raw Gong call summary when not cached yet.
+    context_lines = []
+    try:
+        from jobs.opp_context_summarizer import get_cached_summary, is_cache_fresh
+        acct_id_for_cache = row.get("account_id")
+        cached = get_cached_summary(acct_id_for_cache) if acct_id_for_cache else None
+        if cached and cached.get("summary"):
+            fresh = is_cache_fresh(acct_id_for_cache, {
+                "last_call_date": row.get("last_call_date"),
+                "last_email_date": row.get("last_email_date"),
+                "opps": row.get("opps") or [],
+            })
+            freshness_tag = "" if fresh else "  _(stale — refreshing)_"
+            context_lines.append(f":sparkles: {cached['summary']}{freshness_tag}")
+    except Exception:
+        pass
+
+    # If no AI summary yet, show the raw call summary (template fallback)
+    if not context_lines:
+        call_title = row.get("last_call_title")
+        call_date = row.get("last_call_date")
+        call_summary = (row.get("last_call_summary") or "").strip()
+        if call_title and call_date is not None and not pd.isna(call_date) and call_summary:
+            if len(call_summary) > 400:
+                cut = call_summary[:400]
+                last_period = cut.rfind(". ", 300, 400)
+                call_summary = (cut[:last_period + 1] if last_period > 0 else cut + "…")
+            context_lines.append(
+                f":telephone_receiver: _{call_date} — {call_title}_: {call_summary}\n"
+                f"_:hourglass_flowing_sand: AI summary generating — refresh in ~30s_"
+            )
+
+    body_parts = [header, touch, "\n".join(opp_lines)]
+    if context_lines:
+        body_parts.append("\n".join(context_lines))
+    card_text = "\n".join(body_parts)
+
+    card_block = {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": card_text},
+    }
+
+    # Account-scoped action payload — carries the full opp list so handlers can
+    # iterate across all opps on the account (e.g., unified re-engagement email).
+    action_payload = _json.dumps({
+        "account_id": acct_id,
+        "account_name": acct_name,
+        "opps": [
+            {
+                "opp_id": o.get("opp_id"),
+                "product": o.get("product"),
+                "type": o.get("type"),
+                "stage": o.get("stage"),
+                "next_step": o.get("next_step"),
+            }
+            for o in opps
+        ],
+    })
+
+    # Short button id stem (Slack caps at 255 chars — account_id is 18)
+    short_id = (acct_id or "unknown")[-12:]
+
+    elements = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":email: Draft Re-engage", "emoji": True},
+            "action_id": f"pipeline_draft_{short_id}",
+            "value": action_payload,
+            "style": "primary",
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Propose Updates", "emoji": True},
+            "action_id": f"pipeline_propose_{short_id}",
+            "value": action_payload,
+        },
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":alarm_clock: Snooze 14d", "emoji": True},
+            "action_id": f"pipeline_snooze_{short_id}",
+            "value": action_payload,
+        },
+    ]
+    if acct_sf_link:
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": ":link: Account", "emoji": True},
+            "url": acct_sf_link,
+            "action_id": f"pipeline_sfdc_{short_id}",
+        })
+
+    return [card_block, {"type": "actions", "elements": elements[:25]}]
+
 
 def _fmt_currency(val):
     """Format a number as $X,XXX or $X.XK."""
@@ -565,15 +1140,264 @@ def _build_stale_tab(client, user_id):
 # Per-user filter state for prospecting tab
 _prospect_filter = {}  # user_id -> signal_key or "all"
 
+# Per-user expand state for Plays sub-section (set of expanded play_ids).
+# Collapsed by default; click a play row to expand + see the first 10 accounts.
+_plays_expanded = {}  # user_id -> set(play_id)
+
+
+def _render_play_card(play_id: str, play_meta: dict, row: dict) -> dict:
+    """Render one account under a play as a Slack section block w/ overflow menu."""
+    acct_id = row.get("account_id", "") or ""
+    acct_name = row.get("account_name") or row.get("account") or "Unknown"
+    sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+    acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+
+    # Build the 1-line "why this account" description from the play's per-row formatter
+    try:
+        why = play_meta["sort_description_fn"](row)
+    except Exception:
+        why = ""
+
+    tier = row.get("subscription_tier") or ""
+    tier_badge = f"  `{tier}`" if tier else ""
+
+    text = f"*{acct_str}*{tier_badge}\n_{why}_"
+
+    payload = {"play_id": play_id, "account_id": acct_id, "account": acct_name}
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text},
+        "accessory": {
+            "type": "overflow",
+            "action_id": f"plays_overflow_{play_id}_{acct_id}"[:150],
+            "options": [
+                {"text": {"type": "plain_text", "text": ":email: Draft Re-engage Email"},
+                 "value": json.dumps({**payload, "op": "draft"})},
+                {"text": {"type": "plain_text", "text": ":zzz: Snooze 30d"},
+                 "value": json.dumps({**payload, "op": "snooze"})},
+                {"text": {"type": "plain_text", "text": ":bust_in_silhouette: View in SFDC"},
+                 "value": json.dumps({**payload, "op": "view"})},
+            ],
+        },
+    }
+
+
+def _build_plays_section(user_id) -> list:
+    """Plays sub-section — renders at the top of the Prospecting tab.
+
+    Reads from the file-based plays cache (on-demand refresh if stale). Each
+    play is collapsed by default; click to expand and see up to 10 account
+    cards with Draft/Snooze/View overflow menus.
+    """
+    from jobs.plays_refresh import get_or_refresh_play, get_cached_play
+    from queries.plays import PLAYS
+    from utils.snooze import get_snoozed_play_accounts
+
+    blocks = []
+    expanded = _plays_expanded.get(user_id, set())
+
+    # Compute total accounts across all plays (after play-level snooze filter)
+    total = 0
+    per_play_data = {}
+    for play_id, meta in PLAYS.items():
+        entry = get_or_refresh_play(play_id, user_id=user_id or "")
+        snoozed = get_snoozed_play_accounts(play_id, user_id=user_id or "")
+        rows = [r for r in (entry or {}).get("rows", []) if r.get("account_id") not in snoozed]
+        per_play_data[play_id] = (entry, rows)
+        total += len(rows)
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"*:test_tube: Plays — {total} accounts across {len(PLAYS)} signals*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Curated outbound signals. Accounts appear under every play they qualify for. "
+            "Click a play to expand. Draft creates a contextual re-engagement email."
+        )}],
+    })
+    blocks.append({"type": "divider"})
+
+    # Per-play rows
+    for play_id, meta in PLAYS.items():
+        entry, rows = per_play_data[play_id]
+        count = len(rows)
+        is_expanded = play_id in expanded
+        fetched_at = (entry or {}).get("fetched_at")
+        age_txt = ""
+        if fetched_at:
+            age_sec = time.time() - float(fetched_at)
+            if age_sec < 3600:
+                age_txt = f"_refreshed {int(age_sec / 60)}m ago_"
+            else:
+                age_txt = f"_refreshed {int(age_sec / 3600)}h ago_"
+
+        caret = ":arrow_down:" if is_expanded else ":arrow_right:"
+        header_text = (
+            f"{meta['icon']} *{meta['title']}* — {count} accounts  {caret}\n"
+            f"_{meta['criteria']}_"
+        )
+        if age_txt:
+            header_text += f"  ·  {age_txt}"
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": header_text},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Collapse" if is_expanded else "Expand"},
+                "action_id": f"plays_toggle_{play_id}",
+                "value": play_id,
+            },
+        })
+
+        if is_expanded and count > 0:
+            for row in rows[:10]:
+                blocks.append(_render_play_card(play_id, meta, row))
+            if count > 10:
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": f"_Showing 10 of {count} — snooze or draft to work through the list._"}],
+                })
+        elif is_expanded and count == 0:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "_No accounts match this play right now._"},
+            })
+
+        blocks.append({"type": "divider"})
+
+    return blocks
+
+
+def _format_cp(v):
+    try:
+        return f"${float(v):,.0f}"
+    except (TypeError, ValueError):
+        return "$0"
+
+
+def _render_top_cp_card(item: dict, rank: int) -> dict:
+    """Render a single Top-CP account section block."""
+    acct_id = item.get("account_id", "")
+    acct_name = item.get("account", "Unknown")
+    sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+    acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+
+    tier = item.get("tier") or "—"
+    fte = item.get("fte_size") or "—"
+    status = item.get("account_status") or "—"
+    onboarding = item.get("onboarding_status") or "—"
+    cp = _format_cp(item.get("cp_potential"))
+
+    signals = []
+    if item.get("can_send_international_payments"):
+        signals.append("Int'l enabled")
+    if item.get("wise_onboarded_at"):
+        signals.append("Wise onboarded")
+    industry = item.get("industry")
+    if industry:
+        signals.append(industry)
+
+    lines = [
+        f"*#{rank} {acct_str}*  `{tier}` · {fte} FTE · {status}",
+        f":money_with_wings: *{cp}* CP potential · onboarding: _{onboarding}_",
+    ]
+    if signals:
+        lines.append("_" + " · ".join(signals) + "_")
+
+    payload = {"account": acct_name, "account_id": acct_id}
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "\n".join(lines)},
+        "accessory": {
+            "type": "overflow",
+            "action_id": f"top_cp_overflow_{acct_id}",
+            "options": [
+                {"text": {"type": "plain_text", "text": ":email: Draft Re-engage Email"},
+                 "value": json.dumps({**payload, "op": "draft"})},
+                {"text": {"type": "plain_text", "text": ":zzz: Snooze 30d"},
+                 "value": json.dumps({**payload, "op": "snooze"})},
+                {"text": {"type": "plain_text", "text": ":bust_in_silhouette: View in SFDC"},
+                 "value": json.dumps({**payload, "op": "view"})},
+            ],
+        },
+    }
+
+
+def _build_top_cp_section(user_id) -> list:
+    """Top-CP Re-engage section — top 20 active + top 10 churned by CP potential."""
+    from jobs.top_cp_refresh import get_cached_top_cp, gather_top_cp_accounts
+    from utils.snooze import get_snoozed_accounts
+
+    blocks = []
+    data = get_cached_top_cp(user_id)
+    if not data.get("active") and not data.get("churned"):
+        try:
+            data = gather_top_cp_accounts(user_id=user_id)
+        except Exception as e:
+            logger.warning("Top-CP section: failed to gather: %s", e)
+
+    snoozed = get_snoozed_accounts(user_id=user_id)
+    active = [a for a in data.get("active", []) if a.get("account_id") not in snoozed]
+    churned = [a for a in data.get("churned", []) if a.get("account_id") not in snoozed]
+
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:moneybag: Top-CP Re-engage — your biggest upside*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Top 20 active accounts by CP potential (excludes any CW expansion in last 90 days). "
+            "Refreshed daily at 6 AM PT."
+        )}],
+    })
+
+    if not active and not churned:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_Top-CP list is empty — refresh hasn't run yet or no candidates._"},
+        })
+    else:
+        for i, item in enumerate(active, start=1):
+            blocks.append(_render_top_cp_card(item, i))
+
+        if churned:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*:ghost: Top Churned Accounts ({len(churned)})*  — win-back candidates"},
+            })
+            for i, item in enumerate(churned, start=1):
+                blocks.append(_render_top_cp_card(item, i))
+
+    blocks.append({"type": "divider"})
+    return blocks
+
 
 def _build_prospecting_tab(client, user_id):
-    """Prospecting: Accounts matching hot signal plays, not contacted in 30+ days."""
+    """Prospecting: Top-CP Re-engage + Accounts matching hot signal plays, not contacted in 30+ days."""
     from jobs.prospecting_signals import (
         gather_prospecting_signals, get_cached_prospects,
         SIGNAL_META, MIN_DAYS_UNTOUCHED,
     )
 
     blocks = []
+
+    # Plays section — curated BoB signals at the top, collapsed by default
+    try:
+        blocks.extend(_build_plays_section(user_id))
+    except Exception as e:
+        logger.warning("Plays section failed: %s", e)
+
+    # Top-CP Re-engage section
+    try:
+        blocks.extend(_build_top_cp_section(user_id))
+    except Exception as e:
+        logger.warning("Top-CP section failed: %s", e)
 
     # Try cache first, fall back to live query
     items = get_cached_prospects(user_id=user_id)
@@ -806,6 +1630,25 @@ def _build_prospecting_tab(client, user_id):
         _prospect_cache_ts(user_id)
     ))
 
+    # ── Trials sub-section (folded in from former Trials tab) ─────────────
+    try:
+        trial_blocks = _build_trials_tab(client, user_id)
+        if trial_blocks:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*:test_tube: Procurement Trials*"},
+            })
+            # Skip the first block if it's just the Trials tab header (avoid double headers)
+            skip_first = (
+                trial_blocks
+                and trial_blocks[0].get("type") == "section"
+                and "Trials" in str(trial_blocks[0].get("text", {}).get("text", ""))
+            )
+            blocks.extend(trial_blocks[1:] if skip_first else trial_blocks)
+    except Exception as e:
+        logger.debug("Trials sub-section render failed: %s", e)
+
     return blocks
 
 
@@ -842,6 +1685,721 @@ def _build_meetings_tab(client, user_id):
             "text": {"type": "mrkdwn", "text": "_No customer meetings today_"},
         })
     blocks.append(_updated_at_block(time.time()))
+
+    return blocks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Post-Close
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-user cache for post-close data (10-min TTL)
+_post_close_cache = {}  # user_id -> {"data": [...], "fetched_at": float}
+_POST_CLOSE_CACHE_TTL = 600
+
+
+def _build_post_close_tab(client, user_id):
+    """Post-Close: Track activation and CP generation on recently closed-won opps."""
+    from core.snowflake_client import run_query
+    from core.slack_formatter import format_currency, sf_opp_url, sf_account_url
+    from queries.queries import REALIZED_CP_QUERY, format_query
+    from config import NTR_RATES
+    import pandas as pd
+
+    blocks = []
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:chart_with_upwards_trend: Post-Close Activation Tracker*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Track spend and CP generation on recently closed-won opps. "
+            "90-day window: D30 = 30% SOW, D60 = 60%, D90 = 90%."
+        )}],
+    })
+
+    # Check cache
+    uid = user_id or "default"
+    now = time.time()
+    cached = _post_close_cache.get(uid)
+    items = None
+    if cached and (now - cached["fetched_at"]) < _POST_CLOSE_CACHE_TTL:
+        items = cached["data"]
+
+    if items is None:
+        try:
+            df = run_query(format_query(REALIZED_CP_QUERY, user_id=user_id))
+            if df.empty:
+                items = []
+            else:
+                items = []
+                for _, row in df.iterrows():
+                    days_since_cw = int(float(row.get("days_since_cw", 0) or 0))
+                    if days_since_cw > 90:
+                        continue
+
+                    baseline = float(row.get("baseline_at_close", 0) or 0)
+                    current = float(row.get("current_l30d", 0) or 0)
+                    d1 = float(row.get("spend_d1_d30", 0) or 0)
+                    d2 = float(row.get("spend_d31_d60", 0) or 0)
+                    d3 = float(row.get("spend_d61_d90", 0) or 0)
+                    product = row.get("expansion_subtype", "")
+                    ntr = NTR_RATES.get(product, 0.0095)
+
+                    # Classify status
+                    if baseline <= 0:
+                        if current > 0:
+                            status, icon = "activated", "\u26a1"
+                        else:
+                            status, icon = "inactive", "\u26aa"
+                    else:
+                        ratio = current / baseline
+                        if ratio >= 1.2:
+                            status, icon = "exceeding", "\U0001f534"
+                        elif ratio >= 1.0:
+                            status, icon = "crossed", "\U0001f7e2"
+                        elif ratio >= 0.8:
+                            status, icon = "nearing", "\U0001f7e1"
+                        elif ratio >= 0.3:
+                            status, icon = "below", "\U0001f7e0"
+                        elif current > 0:
+                            status, icon = "minimal", "\U0001f7e4"
+                        else:
+                            status, icon = "inactive", "\u26aa"
+
+                    # CP earned so far
+                    cp_earned = 0
+                    for window_spend in [d1, d2, d3]:
+                        delta = max(0, window_spend - baseline)
+                        cp_earned += delta * ntr
+
+                    # Projected remaining CP
+                    remaining_windows = max(0, 3 - (days_since_cw // 30))
+                    projected_cp = cp_earned + max(0, current - baseline) * ntr * remaining_windows
+
+                    items.append({
+                        "account": row.get("account_name", "Unknown"),
+                        "account_id": row.get("account_id", ""),
+                        "opp_id": row.get("opportunity_id", ""),
+                        "opp_name": row.get("opportunity_name", ""),
+                        "product": product,
+                        "cw_date": str(row.get("cw_date", "")),
+                        "days_since_cw": days_since_cw,
+                        "baseline": baseline,
+                        "current": current,
+                        "d1": d1, "d2": d2, "d3": d3,
+                        "status": status,
+                        "icon": icon,
+                        "cp_earned": cp_earned,
+                        "projected_cp": projected_cp,
+                        "ntr": ntr,
+                    })
+
+                # Sort: underperforming first (action needed), then by projected CP
+                _STATUS_SORT = {"inactive": 0, "minimal": 1, "below": 2, "nearing": 3,
+                                "activated": 4, "crossed": 5, "exceeding": 6}
+                items.sort(key=lambda x: (_STATUS_SORT.get(x["status"], 5), -x["projected_cp"]))
+
+            _post_close_cache[uid] = {"data": items, "fetched_at": now}
+        except Exception as e:
+            logger.warning("Post-Close tab: query failed: %s", e)
+            items = []
+
+    if not items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No recently closed-won opps in the last 90 days._"},
+        })
+        return blocks
+
+    # Summary counts
+    exceeding_ct = sum(1 for i in items if i["status"] in ("exceeding", "crossed"))
+    needs_attn_ct = sum(1 for i in items if i["status"] in ("inactive", "minimal", "below"))
+    total_cp = sum(i["cp_earned"] for i in items)
+    total_projected = sum(i["projected_cp"] for i in items)
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            f":white_check_mark: *{exceeding_ct}* generating CP  |  "
+            f":warning: *{needs_attn_ct}* need attention  |  "
+            f"CP earned: *{_fmt_currency(total_cp)}*  |  "
+            f"Projected: *{_fmt_currency(total_projected)}*"
+        )}],
+    })
+    blocks.append({"type": "divider"})
+
+    # Render each opp card
+    btn_counter = 0
+    for item in items:
+        btn_counter += 1
+        acct_id = item["account_id"]
+        opp_id = item["opp_id"]
+        product = str(item["product"]).replace(" Expansion", "")
+        days = item["days_since_cw"]
+        baseline = item["baseline"]
+        current = item["current"]
+        icon = item["icon"]
+        status = item["status"]
+
+        # SFDC links
+        sf_acct = f"<{SF_BASE_URL}/r/Account/{acct_id}/view|{item['account']}>" if acct_id else item["account"]
+        sf_opp = f"<{SF_BASE_URL}/r/Opportunity/{opp_id}/view|View Opp>" if opp_id else ""
+
+        # Build card text
+        lines = [f"*{sf_acct}*  —  {product}  |  D{days}"]
+
+        # Status line
+        if status == "exceeding":
+            delta = current - baseline
+            lines.append(f"{icon} *Exceeding baseline by {_fmt_currency(delta)}/mo* — CP generating")
+        elif status == "crossed":
+            lines.append(f"{icon} *Just crossed baseline* — CP started")
+        elif status == "nearing":
+            gap = baseline - current
+            lines.append(f"{icon} *{_fmt_currency(gap)} below baseline* — approaching")
+        elif status == "below":
+            lines.append(f"{icon} *Well below baseline* — re-engage")
+        elif status == "minimal":
+            pct = int(current / baseline * 100) if baseline > 0 else 0
+            lines.append(f"{icon} *Minimal spend* — {pct}% of baseline")
+        elif status == "activated":
+            lines.append(f"{icon} *First spend detected* — baseline was $0")
+        else:
+            lines.append(f"{icon} *No spend post-close*")
+
+        # Spend detail
+        lines.append(
+            f"Baseline: {_fmt_currency(baseline)} | Current L30D: {_fmt_currency(current)}"
+        )
+
+        # Window breakdown
+        window_parts = []
+        if days >= 1:
+            window_parts.append(f"D1-30: {_fmt_currency(item['d1'])}")
+        if days >= 31:
+            window_parts.append(f"D31-60: {_fmt_currency(item['d2'])}")
+        if days >= 61:
+            window_parts.append(f"D61-90: {_fmt_currency(item['d3'])}")
+        if window_parts:
+            lines.append(" | ".join(window_parts))
+
+        # CP
+        cp_parts = []
+        if item["cp_earned"] > 0:
+            cp_parts.append(f"CP earned: {_fmt_currency(item['cp_earned'])}")
+        if item["projected_cp"] > item["cp_earned"]:
+            cp_parts.append(f"Projected: {_fmt_currency(item['projected_cp'])}")
+        if cp_parts:
+            lines.append(" | ".join(cp_parts))
+
+        if sf_opp:
+            lines.append(sf_opp)
+
+        card_text = "\n".join(lines)
+        if len(card_text) > 2900:
+            card_text = card_text[:2900] + "..."
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": card_text},
+        })
+
+        # Draft button for underperforming opps
+        if status in ("inactive", "minimal", "below"):
+            checkpoint = "underperforming_d30" if days <= 45 else "underperforming_d60"
+            payload = json.dumps({
+                "account": item["account"],
+                "account_id": acct_id,
+                "opp_id": opp_id,
+                "product": product,
+                "category": checkpoint,
+            })
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":envelope: Draft Re-Engage", "emoji": True},
+                    "action_id": f"draft_outreach_{checkpoint}_{btn_counter}",
+                    "value": payload,
+                    "style": "primary",
+                }],
+            })
+
+        # Divider between cards
+        if btn_counter < len(items):
+            blocks.append({"type": "divider"})
+
+    blocks.append(_updated_at_block(_post_close_cache.get(uid, {}).get("fetched_at", 0)))
+
+    return blocks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Renewals (Spiff Tracker)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_renewals_cache = {}  # user_id -> {"data": [...], "fetched_at": float}
+_RENEWALS_CACHE_TTL = 600
+
+
+def _build_renewals_tab(client, user_id):
+    """Renewals: Track accounts with Plus renewals in the ±30 day spiff window."""
+    from core.snowflake_client import run_query
+    from queries.queries import RENEWAL_WINDOW_QUERY, format_query
+    from config import NTR_RATES
+
+    blocks = []
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:repeat: Renewal Spiff Tracker*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Accounts with a Plus renewal within ±30 days. "
+            "SQLs opened and closed in this window qualify for spiff credit. "
+            "Accounts without open expansion opps are your top targets."
+        )}],
+    })
+
+    # Check cache
+    uid = user_id or "default"
+    now = time.time()
+    cached = _renewals_cache.get(uid)
+    items = None
+    if cached and (now - cached["fetched_at"]) < _RENEWALS_CACHE_TTL:
+        items = cached["data"]
+
+    if items is None:
+        try:
+            df = run_query(format_query(RENEWAL_WINDOW_QUERY, user_id=user_id))
+            if df.empty:
+                items = []
+            else:
+                items = []
+                for _, row in df.iterrows():
+                    days = int(float(row.get("days_until_renewal", 0) or 0))
+                    card = float(row.get("card_l30d", 0) or 0)
+                    bill = float(row.get("bill_l30d", 0) or 0)
+                    travel = float(row.get("travel_l30d", 0) or 0)
+                    treasury = float(row.get("treasury_avg", 0) or 0)
+                    open_opps = str(row.get("open_opps", "") or "")
+                    recent_cw = str(row.get("recent_cw_opps", "") or "")
+                    last_email = str(row.get("last_email_date", "") or "")
+                    last_call = str(row.get("last_call_date", "") or "")
+
+                    # Determine status for sorting
+                    if recent_cw:
+                        status = "captured"  # Already have CW'd opps in window
+                    elif open_opps:
+                        status = "in_progress"  # Have open opps, working on it
+                    else:
+                        status = "untapped"  # No opps — action needed
+
+                    # Identify products with spend but no opp
+                    product_suggestions = []
+                    opp_products = (open_opps + " " + recent_cw).lower()
+                    if card > 5000 and "card" not in opp_products:
+                        product_suggestions.append(f"Card ({_fmt_currency(card)}/mo)")
+                    if bill > 5000 and "bill pay" not in opp_products:
+                        product_suggestions.append(f"Bill Pay ({_fmt_currency(bill)}/mo)")
+                    if travel > 2000 and "travel" not in opp_products:
+                        product_suggestions.append(f"Travel ({_fmt_currency(travel)}/mo)")
+                    if treasury > 50000 and "treasury" not in opp_products:
+                        product_suggestions.append(f"Treasury ({_fmt_currency(treasury)} avg)")
+
+                    items.append({
+                        "account": row.get("account_name", "Unknown"),
+                        "account_id": row.get("account_id", ""),
+                        "renewal_opp_id": row.get("renewal_opp_id", ""),
+                        "renewal_date": str(row.get("renewal_date", "")),
+                        "renewal_stage": row.get("renewal_stage", ""),
+                        "days_until": days,
+                        "card": card, "bill": bill, "travel": travel, "treasury": treasury,
+                        "open_opps": open_opps,
+                        "recent_cw": recent_cw,
+                        "last_email": last_email,
+                        "last_call": last_call,
+                        "status": status,
+                        "suggestions": product_suggestions,
+                    })
+
+                # Sort: untapped first (action needed), then in_progress, then captured
+                _STATUS_SORT = {"untapped": 0, "in_progress": 1, "captured": 2}
+                items.sort(key=lambda x: (_STATUS_SORT.get(x["status"], 1), x["days_until"]))
+
+            _renewals_cache[uid] = {"data": items, "fetched_at": now}
+        except Exception as e:
+            logger.warning("Renewals tab: query failed: %s", e)
+            items = []
+
+    if not items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No accounts with renewals in the ±30 day window right now._"},
+        })
+        return blocks
+
+    # Summary counts
+    untapped = sum(1 for i in items if i["status"] == "untapped")
+    in_progress = sum(1 for i in items if i["status"] == "in_progress")
+    captured = sum(1 for i in items if i["status"] == "captured")
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            f":red_circle: *{untapped}* untapped (no open SQL)  |  "
+            f":large_yellow_circle: *{in_progress}* in progress  |  "
+            f":white_check_mark: *{captured}* captured  |  "
+            f"*{len(items)}* total in window"
+        )}],
+    })
+    blocks.append({"type": "divider"})
+
+    # Render account cards
+    btn_counter = 0
+    for item in items:
+        btn_counter += 1
+        acct_id = item["account_id"]
+        days = item["days_until"]
+        status = item["status"]
+
+        # Status icon
+        if status == "untapped":
+            icon = ":red_circle:"
+        elif status == "in_progress":
+            icon = ":large_yellow_circle:"
+        else:
+            icon = ":white_check_mark:"
+
+        # SFDC link
+        sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+        acct_str = f"<{sf_link}|{item['account']}>" if sf_link else item["account"]
+
+        # Renewal timing
+        if days > 0:
+            timing = f"Renews in {days}d ({item['renewal_date']})"
+        elif days == 0:
+            timing = f"Renews *today* ({item['renewal_date']})"
+        else:
+            timing = f"Renewed {abs(days)}d ago ({item['renewal_date']})"
+
+        lines = [f"{icon} *{acct_str}*  —  {timing}"]
+        lines.append(f"Renewal: {item['renewal_stage']}")
+
+        # Spend summary (only show products with meaningful volume)
+        spend_parts = []
+        if item["card"] > 0:
+            spend_parts.append(f"Card: {_fmt_currency(item['card'])}")
+        if item["bill"] > 0:
+            spend_parts.append(f"Bill Pay: {_fmt_currency(item['bill'])}")
+        if item["travel"] > 0:
+            spend_parts.append(f"Travel: {_fmt_currency(item['travel'])}")
+        if item["treasury"] > 0:
+            spend_parts.append(f"Treasury: {_fmt_currency(item['treasury'])}")
+        if spend_parts:
+            lines.append("L30D: " + " | ".join(spend_parts))
+
+        # Product suggestions (spend with no opp)
+        if item["suggestions"]:
+            lines.append(":dart: *SQL targets:* " + ", ".join(item["suggestions"]))
+
+        # Open expansion opps
+        if item["open_opps"]:
+            lines.append(f":hourglass_flowing_sand: Open: {item['open_opps']}")
+
+        # Recently CW'd (spiff credit)
+        if item["recent_cw"]:
+            lines.append(f":white_check_mark: Spiff credit: {item['recent_cw']}")
+
+        # Last touch
+        touch_parts = []
+        if item["last_email"] and item["last_email"] != "None":
+            touch_parts.append(f"Email: {item['last_email']}")
+        if item["last_call"] and item["last_call"] != "None":
+            touch_parts.append(f"Call: {item['last_call']}")
+        if touch_parts:
+            lines.append(":telephone_receiver: " + " | ".join(touch_parts))
+        elif status == "untapped":
+            lines.append(":warning: _No recent contact — cold outreach needed_")
+
+        card_text = "\n".join(lines)
+        if len(card_text) > 2900:
+            card_text = card_text[:2900] + "..."
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": card_text},
+        })
+
+        # Draft button for untapped and in_progress accounts
+        if status in ("untapped", "in_progress"):
+            # Use the best product suggestion for the draft category, or default to prospect
+            best_product = ""
+            if item["suggestions"]:
+                # Extract first suggestion's product name
+                first_sug = item["suggestions"][0]
+                if "Card" in first_sug:
+                    best_product = "Card Expansion"
+                elif "Bill Pay" in first_sug:
+                    best_product = "Bill Pay Expansion"
+                elif "Travel" in first_sug:
+                    best_product = "Travel Expansion"
+                elif "Treasury" in first_sug:
+                    best_product = "Treasury Expansion"
+
+            payload = json.dumps({
+                "account": item["account"],
+                "account_id": acct_id,
+                "opp_id": "",
+                "product": best_product,
+                "category": "prospect",
+            })
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":envelope: Draft Outreach", "emoji": True},
+                    "action_id": f"draft_outreach_prospect_{btn_counter}",
+                    "value": payload,
+                    "style": "primary",
+                }],
+            })
+
+        # Divider between cards
+        if btn_counter < len(items):
+            blocks.append({"type": "divider"})
+
+    blocks.append(_updated_at_block(_renewals_cache.get(uid, {}).get("fetched_at", 0)))
+
+    return blocks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Trials
+# ══════════════════════════════════════════════════════════════════════════════
+
+_trials_cache = {}  # user_id -> {"data": [...], "fetched_at": float}
+_TRIALS_CACHE_TTL = 600
+
+
+def _build_trials_tab(client, user_id):
+    """Trials: Track accounts with active Plus or Procurement trials."""
+    from core.snowflake_client import run_query
+    from queries.queries import ACTIVE_TRIALS_QUERY, format_query
+    from utils.account_resolver import fetch_contact_emails
+    from utils.contact_scoring import select_recipients
+
+    blocks = []
+
+    # Header
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:test_tube: Active Trials*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "Accounts with active Plus or Procurement trials. "
+            "Engage early to drive conversion before the trial expires."
+        )}],
+    })
+
+    # Check cache
+    uid = user_id or "default"
+    now = time.time()
+    cached = _trials_cache.get(uid)
+    items = None
+    if cached and (now - cached["fetched_at"]) < _TRIALS_CACHE_TTL:
+        items = cached["data"]
+
+    if items is None:
+        try:
+            df = run_query(format_query(ACTIVE_TRIALS_QUERY, user_id=user_id))
+            if df.empty:
+                items = []
+            else:
+                # Batch fetch contacts for all trial accounts
+                acct_ids = list(df["account_id"].dropna().unique())
+                all_contacts = fetch_contact_emails(None, acct_ids) if acct_ids else {}
+
+                items = []
+                for _, row in df.iterrows():
+                    trial_type = str(row.get("trial_type", "") or "")
+                    if not trial_type:
+                        continue
+
+                    import math
+                    _days_raw = row.get("days_remaining", 0)
+                    days = 0 if _days_raw is None or (isinstance(_days_raw, float) and math.isnan(_days_raw)) else int(float(_days_raw))
+                    acct_id = row.get("account_id", "")
+
+                    # Get top contacts
+                    contacts = all_contacts.get(acct_id, [])
+                    primary, cc = select_recipients(contacts, max_cc=2)
+
+                    # Status
+                    if "expired" in trial_type.lower():
+                        status = "expired"
+                        icon = ":red_circle:"
+                    elif days <= 7:
+                        status = "expiring"
+                        icon = ":large_yellow_circle:"
+                    else:
+                        status = "active"
+                        icon = ":large_green_circle:"
+
+                    items.append({
+                        "account": row.get("account_name", "Unknown"),
+                        "account_id": acct_id,
+                        "trial_type": trial_type,
+                        "trial_start": str(row.get("trial_start", "")),
+                        "trial_end": str(row.get("trial_end", "")),
+                        "days_remaining": days,
+                        "status": status,
+                        "icon": icon,
+                        "last_email": str(row.get("last_email_date", "") or ""),
+                        "last_call": str(row.get("last_call_date", "") or ""),
+                        "primary_contact": primary,
+                        "cc_contacts": cc,
+                    })
+
+                # Sort: expiring soonest first, then active, then expired
+                _STATUS_SORT = {"expiring": 0, "active": 1, "expired": 2}
+                items.sort(key=lambda x: (_STATUS_SORT.get(x["status"], 1), x["days_remaining"]))
+
+            _trials_cache[uid] = {"data": items, "fetched_at": now}
+        except Exception as e:
+            logger.warning("Trials tab: query failed: %s", e)
+            items = []
+
+    if not items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "_No active trials in your book right now._"},
+        })
+        return blocks
+
+    # Summary
+    active_plus = sum(1 for i in items if i["trial_type"] == "Plus" and i["status"] != "expired")
+    active_proc = sum(1 for i in items if i["trial_type"] == "Procurement" and i["status"] != "expired")
+    expiring = sum(1 for i in items if i["status"] == "expiring")
+    expired = sum(1 for i in items if i["status"] == "expired")
+
+    summary_parts = []
+    if active_plus:
+        summary_parts.append(f":large_green_circle: *{active_plus}* Plus trial{'s' if active_plus != 1 else ''}")
+    if active_proc:
+        summary_parts.append(f":large_green_circle: *{active_proc}* Procurement trial{'s' if active_proc != 1 else ''}")
+    if expiring:
+        summary_parts.append(f":large_yellow_circle: *{expiring}* expiring this week")
+    if expired:
+        summary_parts.append(f":red_circle: *{expired}* recently expired")
+
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": "  |  ".join(summary_parts)}],
+    })
+    blocks.append({"type": "divider"})
+
+    # Render account cards
+    btn_counter = 0
+    for item in items:
+        btn_counter += 1
+        acct_id = item["account_id"]
+        icon = item["icon"]
+        days = item["days_remaining"]
+        trial_type = item["trial_type"]
+
+        # SFDC link
+        sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+        acct_str = f"<{sf_link}|{item['account']}>" if sf_link else item["account"]
+
+        # Timing
+        if days > 0:
+            timing = f"{days}d remaining"
+        elif days == 0:
+            timing = "Expires *today*"
+        else:
+            timing = f"Expired {abs(days)}d ago"
+
+        lines = [f"{icon} *{acct_str}*  —  {trial_type} Trial  |  {timing}"]
+        lines.append(f"Started: {item['trial_start']}  |  Ends: {item['trial_end']}")
+
+        # Key contacts
+        primary = item.get("primary_contact")
+        if primary:
+            name = primary.get("name", "")
+            title = primary.get("title", "")
+            role = primary.get("user_role", "")
+            contact_str = name
+            if role:
+                contact_str += f" ({role.replace('BUSINESS_', '').title()})"
+            elif title:
+                contact_str += f" ({title})"
+            lines.append(f":bust_in_silhouette: {contact_str}")
+
+            cc = item.get("cc_contacts", [])
+            if cc:
+                cc_names = ", ".join(
+                    f"{c.get('name', '')}" for c in cc
+                )
+                lines.append(f"   CC: {cc_names}")
+
+        # Last touch
+        touch_parts = []
+        if item["last_email"] and item["last_email"] != "None":
+            touch_parts.append(f"Email: {item['last_email']}")
+        if item["last_call"] and item["last_call"] != "None":
+            touch_parts.append(f"Call: {item['last_call']}")
+        if touch_parts:
+            lines.append(":telephone_receiver: " + " | ".join(touch_parts))
+        else:
+            lines.append(":warning: _No recent contact — reach out now_")
+
+        card_text = "\n".join(lines)
+        if len(card_text) > 2900:
+            card_text = card_text[:2900] + "..."
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": card_text},
+        })
+
+        # Draft button — fixed template for Procurement, smart drafter for Plus
+        is_procurement = "procurement" in trial_type.lower()
+        draft_category = "prospect_active_procurement_trial" if is_procurement else "plus_trial"
+
+        payload = json.dumps({
+            "account": item["account"],
+            "account_id": acct_id,
+            "opp_id": "",
+            "product": "Procurement" if is_procurement else "SaaS",
+            "category": draft_category,
+            "trial_end": item.get("trial_end", ""),
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": ":envelope: Draft Outreach", "emoji": True},
+                "action_id": f"draft_outreach_{draft_category}_{btn_counter}",
+                "value": payload,
+                "style": "primary",
+            }],
+        })
+
+        # Divider between cards
+        if btn_counter < len(items):
+            blocks.append({"type": "divider"})
+
+    blocks.append(_updated_at_block(_trials_cache.get(uid, {}).get("fetched_at", 0)))
 
     return blocks
 
@@ -2325,6 +3883,361 @@ def register_home_tab_actions(app):
             )
         except Exception as e:
             logger.error("Snooze handler failed: %s", e)
+
+    # ── Pipeline tab: sort toggle ────────────────────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_sort_")})
+    def handle_pipeline_sort(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        action_id = action.get("action_id", "")
+        sort_mode = action_id.replace("pipeline_sort_", "", 1)
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        state = _get_pipeline_state(user_id)
+        state["sort"] = sort_mode
+        state["page"] = 1  # reset to page 1 on sort change
+        _active_tab[user_id] = "pipeline"
+
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Pipeline sort failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Pipeline tab: filter chip toggle ─────────────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_filter_")})
+    def handle_pipeline_filter(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        action_id = action.get("action_id", "")
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        # Parse "pipeline_filter_{key}_{value}" — key is one of product/stage/type/staleness
+        parts = action_id.replace("pipeline_filter_", "", 1).split("_", 1)
+        if len(parts) != 2:
+            return
+        key, value = parts
+        # Restore spaces in value (we replaced them with _ in action_id)
+        value = value.replace("_", " ")
+
+        state = _get_pipeline_state(user_id)
+        _active_tab[user_id] = "pipeline"
+        state["page"] = 1
+
+        if key == "staleness":
+            # Single-select
+            state["filters"]["staleness"] = value.replace(" ", "")  # e.g. "15+"
+        else:
+            # Multi-select — toggle membership
+            key_plural = key + "s"  # products / stages / types
+            current = state["filters"].get(key_plural, [])
+            if value in current:
+                current.remove(value)
+            else:
+                current.append(value)
+            state["filters"][key_plural] = current
+
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Pipeline filter failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Pipeline tab: pagination ─────────────────────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_page_")})
+    def handle_pipeline_page(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        direction = action.get("action_id", "").replace("pipeline_page_", "", 1)
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        state = _get_pipeline_state(user_id)
+        _active_tab[user_id] = "pipeline"
+        if direction == "prev":
+            state["page"] = max(1, state.get("page", 1) - 1)
+        elif direction == "next":
+            state["page"] = state.get("page", 1) + 1  # clamped in _build_pipeline_tab
+
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Pipeline pagination failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Pipeline tab: reset filters ──────────────────────────────────────
+    @app.action("pipeline_reset_filters")
+    def handle_pipeline_reset(ack, body, client):
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        _pipeline_state[user_id] = _pipeline_default_state()
+        _active_tab[user_id] = "pipeline"
+
+        def _refresh():
+            try:
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Pipeline reset failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    # ── Pipeline tab: Draft Re-engage (Phase 2b — unified multi-opp email) ──
+    @app.action({"action_id": re.compile(r"^pipeline_draft_")})
+    def handle_pipeline_draft(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        try:
+            payload = json.loads(action.get("value", "{}"))
+            account_name = payload.get("account_name", "")
+            opps = payload.get("opps", []) or []
+
+            products = ", ".join(
+                sorted({(o.get("product") or o.get("type") or "?") for o in opps})
+            )
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":email: Drafting unified re-engagement email for *{account_name}* ({len(opps)} open opps: {products})...",
+            )
+
+            def _draft():
+                try:
+                    from jobs.pipeline_drafter import draft_account_reengagement
+                    draft_account_reengagement(payload, client, user_id=user_id)
+                except Exception as e:
+                    logger.error("Pipeline draft failed: %s", e, exc_info=True)
+                    client.chat_postMessage(
+                        channel=user_id,
+                        text=f":warning: Draft failed for {account_name}: {e}",
+                    )
+
+            threading.Thread(target=_draft, daemon=True).start()
+        except Exception as e:
+            logger.error("Pipeline draft handler failed: %s", e)
+
+    # ── Pipeline tab: Snooze 14d (account-level) ─────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_snooze_")})
+    def handle_pipeline_snooze(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        try:
+            payload = json.loads(action.get("value", "{}"))
+            account_name = payload.get("account_name", "")
+            account_id = payload.get("account_id", "")
+
+            from utils.snooze import snooze_opp
+            # Account-level key — matches the Prospecting tab's `acct:<id>` pattern.
+            snooze_opp(f"acct:{account_id}", days=14, user_id=user_id)
+
+            _pipeline_cache.pop(user_id, None)
+            _active_tab[user_id] = "pipeline"
+
+            def _refresh():
+                try:
+                    blocks = _build_home_blocks(client, user_id)
+                    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+                except Exception as e:
+                    logger.error("Pipeline snooze refresh failed: %s", e)
+
+            threading.Thread(target=_refresh, daemon=True).start()
+
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":zzz: Snoozed *{account_name}* for 14 days (all open opps hidden). Will reappear after that.",
+            )
+        except Exception as e:
+            logger.error("Pipeline snooze failed: %s", e)
+
+    # ── Pipeline tab: Propose SFDC Updates ───────────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_propose_")})
+    def handle_pipeline_propose(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        try:
+            payload = json.loads(action.get("value", "{}"))
+            account_id = payload.get("account_id", "")
+            account_name = payload.get("account_name", "")
+        except Exception as e:
+            logger.error("Pipeline propose payload parse failed: %s", e)
+            return
+
+        if not account_id:
+            return
+
+        client.chat_postMessage(
+            channel=user_id,
+            text=f":arrows_counterclockwise: Analyzing recent call + email activity for *{account_name}* to propose SFDC updates...",
+        )
+
+        def _run():
+            try:
+                from jobs.pipeline_update_proposer import (
+                    propose_updates_for_account,
+                    dm_account_update_review,
+                )
+                # Pre-check: if no proposals, DM the "looks accurate" message.
+                result = propose_updates_for_account(account_id, user_id=user_id)
+                if not result.get("any_proposals"):
+                    client.chat_postMessage(
+                        channel=user_id,
+                        text=(f":white_check_mark: Analyzed *{account_name}* — "
+                              f"no SFDC updates needed. Current fields look accurate "
+                              f"per recent call + email activity."),
+                    )
+                    return
+                # Header + review cards
+                n_with_changes = sum(1 for v in result["proposals_by_opp"].values()
+                                      if not v.get("empty"))
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=(f":arrows_counterclockwise: Proposed SFDC updates for "
+                          f"*{account_name}* ({n_with_changes} opps with changes)."),
+                )
+                dm_account_update_review(
+                    client, user_id, account_id,
+                    pending_store=_pending_sfdc_updates,
+                    source_label="Pipeline tab",
+                )
+            except Exception as e:
+                logger.error("Propose updates failed: %s", e, exc_info=True)
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f":warning: Propose Updates failed for {account_name}: {e}",
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── Pipeline tab: Apply Selected SFDC updates ────────────────────────
+    @app.action({"action_id": re.compile(r"^pipeline_apply_updates_")})
+    def handle_pipeline_apply(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        opp_id = action.get("action_id", "").replace("pipeline_apply_updates_", "", 1)
+
+        pending = _pending_sfdc_updates.get(user_id, {}).get(opp_id)
+        if not pending or not pending.get("proposals"):
+            client.chat_postMessage(
+                channel=user_id,
+                text=":warning: No pending updates to apply (may have been skipped or timed out).",
+            )
+            return
+
+        def _apply():
+            try:
+                from core.salesforce_client import update_opportunity
+                fields = {}
+                if "next_step" in pending["proposals"]:
+                    fields["NextStep"] = pending["proposals"]["next_step"][:255]
+                if "next_step_due_date" in pending["proposals"]:
+                    fields["Next_Step_Due_Date__c"] = pending["proposals"]["next_step_due_date"]
+                if "expansion_notes" in pending["proposals"]:
+                    fields["Expansion_Notes__c"] = pending["proposals"]["expansion_notes"][:200]
+                if "stage" in pending["proposals"]:
+                    fields["StageName"] = pending["proposals"]["stage"]
+                if "close_date" in pending["proposals"]:
+                    fields["CloseDate"] = pending["proposals"]["close_date"]
+
+                ok = update_opportunity(opp_id, fields, user_id=user_id)
+                if ok:
+                    sf_link = f"{SF_BASE_URL}/r/Opportunity/{opp_id}/view"
+                    applied_fields = ", ".join(pending["proposals"].keys())
+                    msg = (
+                        f":white_check_mark: Applied updates to *{pending['account_name']}* — "
+                        f"*{pending['product']}* opp. Fields changed: `{applied_fields}`.\n"
+                        f"<{sf_link}|View in Salesforce>"
+                    )
+                else:
+                    msg = (
+                        f":warning: SFDC update via Growth MCP returned failure for "
+                        f"*{pending['account_name']}* — *{pending['product']}*. "
+                        f"Check bot logs for details; fields were: `{', '.join(fields.keys())}`."
+                    )
+
+                client.chat_postMessage(channel=user_id, text=msg)
+                # Invalidate pipeline cache + pending state
+                _pipeline_cache.pop(user_id, None)
+                _pending_sfdc_updates.get(user_id, {}).pop(opp_id, None)
+            except Exception as e:
+                logger.error("SFDC apply failed: %s", e, exc_info=True)
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=f":warning: Apply failed: {e}",
+                )
+
+        threading.Thread(target=_apply, daemon=True).start()
+
+    # ── Pipeline tab: Skip a specific field from the proposal ────────────
+    @app.action({"action_id": re.compile(r"^pipeline_skip_field_")})
+    def handle_pipeline_skip_field(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        try:
+            payload = json.loads(action.get("value", "{}"))
+            opp_id = payload.get("opp_id", "")
+            field = payload.get("field", "")
+        except Exception:
+            return
+
+        pending = _pending_sfdc_updates.get(user_id, {}).get(opp_id)
+        if not pending:
+            return
+        pending["proposals"].pop(field, None)
+
+        # Re-render this review card in place if we have the message ts
+        channel = pending.get("channel")
+        message_ts = pending.get("message_ts")
+        if channel and message_ts:
+            from jobs.pipeline_update_proposer import build_opp_review_blocks
+            blocks = build_opp_review_blocks(pending)
+            try:
+                client.chat_update(channel=channel, ts=message_ts, blocks=blocks, text=f"Updates for {pending['account_name']}")
+            except Exception as e:
+                logger.debug("Review card re-render failed: %s", e)
+
+    # ── Pipeline tab: Dismiss review card without applying ───────────────
+    @app.action({"action_id": re.compile(r"^pipeline_dismiss_updates_")})
+    def handle_pipeline_dismiss_updates(ack, body, client):
+        ack()
+        action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        opp_id = action.get("action_id", "").replace("pipeline_dismiss_updates_", "", 1)
+
+        pending = _pending_sfdc_updates.get(user_id, {}).pop(opp_id, None)
+        if pending and pending.get("channel") and pending.get("message_ts"):
+            try:
+                client.chat_update(
+                    channel=pending["channel"],
+                    ts=pending["message_ts"],
+                    text=f":x: Dismissed proposed updates for *{pending.get('account_name','?')}* — *{pending.get('product','?')}*.",
+                    blocks=[{
+                        "type": "section",
+                        "text": {"type": "mrkdwn",
+                                 "text": f":x: Dismissed proposed updates for *{pending.get('account_name','?')}* — *{pending.get('product','?')}*."},
+                    }],
+                )
+            except Exception:
+                pass
+
+    # ── Pipeline tab: SFDC link (no handler needed — URL button) ─────────
+    @app.action({"action_id": re.compile(r"^pipeline_sfdc_")})
+    def handle_pipeline_sfdc(ack, body, client):
+        ack()  # just ack the URL click; Slack opens the link itself
 
     # ── Prospecting tab: filter buttons ──────────────────────────────────
     @app.action({"action_id": re.compile(r"^prospect_filter_")})

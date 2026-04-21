@@ -73,6 +73,8 @@ def run_post_meeting_followup(client, user_id=None, force=False):
             return
 
         _send_followup_dm(results, client, dm_target=dm_target)
+        # Auto-propose now lives INSIDE _send_followup_dm so all callers
+        # (slash-command re-runs, targeted account runs) get it.
 
     except Exception as e:
         logger.error("Post-meeting followup (Gong) failed: %s", e)
@@ -425,15 +427,53 @@ Return a JSON object with these exact keys:
 - "buying_signals": string — specific quotes or evidence. "None detected" if nothing found.
 - "follow_up_email_to": string — best email to send follow-up to (from participant list, or empty)
 - "follow_up_email_subject": string — format: "Ramp Follow-Up - <brief summary of key topics discussed>"
-- "follow_up_email_body": string — HTML formatted follow-up email. Structure it with:
-    * A brief opening referencing specific discussion points from the call
-    * One section per product discussed (use <strong> for section headers like "Treasury — Getting Started", "Bill Pay")
-    * Within each section, reference specific details from the call (amounts mentioned, pain points, current tools)
-    * Use bullet points (<ul><li>) for feature highlights relevant to what was discussed
-    * End with a clear next step and offer to help
-    * Sign off as: {owner_name}\\nAccount Manager @ Ramp\\nBook a meeting: {booking_link}
-    * Tone: warm, helpful, consultative — like a trusted advisor, not salesy
-    * Do NOT use markdown — use HTML tags only (<strong>, <ul>, <li>, <a>, <br>, <p>)
+- "follow_up_email_body": string — HTML-formatted post-meeting email in 4
+    explicit sections, in this exact order. Use <strong> for section headers
+    and <ul><li> for bullets:
+
+    <strong>Takeaways</strong>
+    <ul>
+      <li>3-5 bullets pairing a specific thing the customer said on the call
+          (dollar amount, vendor, timeline, named person) with the Ramp
+          capability that addresses it. Never generic. Cite exact numbers
+          and names from the transcript.</li>
+    </ul>
+
+    <strong>{customer_first_name}'s Next Steps</strong>
+    <ul>
+      <li>2-4 bullets, 2nd person, describing what the CUSTOMER owns.
+          "Stella: ask Roger for admin access." Route items to named
+          stakeholders when clear.</li>
+    </ul>
+
+    <strong>{owner_first_name}'s Next Steps</strong>
+    <ul>
+      <li>1-3 bullets, 1st person, describing what YOU own. End with a
+          specific deeper-dive ask with a 2-day time window, e.g.
+          "I'll schedule a 30-min working session next Tuesday or
+          Wednesday to walk through Treasury setup — what times work?"</li>
+    </ul>
+
+    <strong>Resources</strong>
+    <ul>
+      <li>2-4 Ramp help-article links from the AVAILABLE RAMP RESOURCE
+          LINKS above. Format: <a href="URL">Title</a>. Only include if
+          resources are provided; otherwise OMIT this entire section.</li>
+    </ul>
+
+    After the 4 sections, add one line before the signature:
+      <p>Book a call: <a href="{booking_link}">{booking_link}</a></p>
+
+    TONE: warm, direct, contractions natural. No "I hope this email finds
+    you well", no "just circling back", no "touching base", no generic
+    nurture talk.
+
+    HARD RULES — violations are failures:
+    * Do NOT say "I was notified" / anything implying an automated alert
+    * Do NOT guilt-trip about unanswered emails
+    * Do NOT invent facts. Every Takeaway must be traceable to the transcript.
+    * Do NOT use markdown. HTML tags only: <strong>, <ul>, <li>, <a>, <br>, <p>
+    * 250-400 words total.
 - "follow_up_email_cc": string — other emails to CC, comma-separated, or empty
 - "opps": list of objects, each with:
     - "product": string (one of "Card Expansion", "Bill Pay Expansion", "Travel Expansion", "Treasury Expansion", "Procurement")
@@ -486,7 +526,7 @@ Return ONLY valid JSON, no markdown fences."""
 def _send_followup_dm(results, client, dm_target=None):
     """Send a consolidated Gong follow-up DM — aligned with Granola DM format."""
     from datetime import datetime, timedelta
-
+    dm_target = dm_target or GREG_SLACK_ID
     blocks = [{
         "type": "header",
         "text": {"type": "plain_text",
@@ -555,13 +595,31 @@ def _send_followup_dm(results, client, dm_target=None):
                 "text": {"type": "mrkdwn", "text": f"*Next Steps:*\n{steps_text}"},
             })
 
-        # Follow-up email section
-        email_to = item.get("follow_up_email_to", "")
+        # Follow-up email section — recipient resolution via unified resolver
         email_subject = item.get("follow_up_email_subject", "")
         email_body = item.get("follow_up_email_body", "")
+        try:
+            from utils.recipient_resolver import resolve_outbound_recipients
+            acct_id_for_resolver = item.get("account_id") or ""
+            current_attendees = item.get("participants") or item.get("ext_emails") or []
+            primary_contact, cc_contacts_resolved, _dbg = resolve_outbound_recipients(
+                account_id=acct_id_for_resolver,
+                user_id=dm_target,
+                current_meeting_attendees=current_attendees,
+                max_cc=4,
+            )
+            if primary_contact:
+                email_to = primary_contact.get("email", "")
+                cc = ", ".join(c.get("email", "") for c in cc_contacts_resolved if c.get("email"))
+            else:
+                email_to = item.get("follow_up_email_to", "")
+                cc = item.get("follow_up_email_cc", "") or ""
+        except Exception as e:
+            logger.debug("Resolver failed for Gong post-meeting email — fallback: %s", e)
+            email_to = item.get("follow_up_email_to", "")
+            cc = item.get("follow_up_email_cc", "") or ""
 
         if email_to and email_body:
-            cc = item.get("follow_up_email_cc", "") or ""
 
             html_body = email_body
 
@@ -703,45 +761,10 @@ def _send_followup_dm(results, client, dm_target=None):
                     }],
                 })
 
-        # Opp update suggestions
-        opp_updates = item.get("opp_updates", [])
-        if opp_updates:
-            for j, update in enumerate(opp_updates):
-                product = update.get("product", "")
-                field_updates = update.get("field_updates", {})
-                rationale = update.get("rationale", "")
-
-                update_lines = [f"\U0001f4dd *Update Opp: {product}*"]
-                if rationale:
-                    update_lines.append(f"  _{rationale}_")
-
-                for field_name, new_val in field_updates.items():
-                    label = field_name.replace("_", " ").title()
-                    update_lines.append(f"  `{label}:` {new_val}")
-
-                blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "\n".join(update_lines)},
-                })
-
-                call_id = item.get("call_id", "")
-                update_payload = json.dumps({
-                    "account_name": account_name,
-                    "account_id": account_id,
-                    "product": product,
-                    "field_updates": field_updates,
-                    "meeting_id": call_id,
-                })
-
-                blocks.append({
-                    "type": "actions",
-                    "elements": [{
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": f"Apply {product} Update", "emoji": True},
-                        "action_id": f"update_opp_sfdc_{j}_{call_id[:8]}",
-                        "value": update_payload,
-                    }],
-                })
+        # Legacy opp_updates rendering disabled — superseded by the grounded
+        # pipeline_update_proposer that fires at the end of this DM. See
+        # granola_followup.py for the same treatment. Mirroring here for
+        # consistency.
 
         # Account match verification
         if account_id:
@@ -779,3 +802,19 @@ def _send_followup_dm(results, client, dm_target=None):
         text=f"Gong Follow-Up: {len(results)} call(s) analyzed",
     )
     logger.info("Gong follow-up DM sent: %d calls", len(results))
+
+    # Auto-propose SFDC updates for matched accounts. Mirrors the Granola DM path.
+    try:
+        from jobs.pipeline_update_proposer import dm_account_update_review
+        from handlers.home_tab import _pending_sfdc_updates
+        for item in results:
+            acct_id = item.get("account_id")
+            if not acct_id:
+                continue
+            dm_account_update_review(
+                client, dm_target, acct_id,
+                pending_store=_pending_sfdc_updates,
+                source_label="Post-meeting",
+            )
+    except Exception as e:
+        logger.warning("Auto-propose after Gong DM failed: %s", e)

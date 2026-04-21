@@ -528,7 +528,7 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
 
             days_open = int(_safe_float(row.get("days_open")))
 
-            cp_score = min(50, est_cp / 50) if est_cp > 0 else min(20, recent * ntr * 3 / 50)
+            cp_score = min(50, est_cp / 50)
             stage_bonus = stage_rank * 8
             staleness_bonus = min(15, days_since / 4)
             priority = cp_score + stage_bonus + staleness_bonus
@@ -616,7 +616,12 @@ def _gather_stale_opps(user_id: str = None) -> list[dict]:
                 "last_email_date": last_email_date,
             })
 
-        items.sort(key=lambda x: -x["priority"])
+        # Sort by est_cp desc — CP is the comp-weighted priority per CLAUDE.md.
+        # Previous sort mixed stage/staleness bonuses with cp_score, causing high-stage
+        # zero-CP opps to outrank real CP-earning opps. The UI's "staleness" toggle
+        # in home_tab.py re-sorts this list itself, so CP-first here is correct for both
+        # the default CP view and as the input to the toggle.
+        items.sort(key=lambda x: -x["est_cp"])
 
         # Filter out snoozed opps
         try:

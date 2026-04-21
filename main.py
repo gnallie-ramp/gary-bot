@@ -114,6 +114,7 @@ def _start_scheduler():
     from jobs.granola_followup import run_granola_followup
     from jobs.acceleration_alert import run_acceleration_alert
     from jobs.prospecting_signals import run_prospecting_refresh
+    from jobs.top_cp_refresh import run_top_cp_refresh
     from jobs.activation_alerts import run_activation_alerts
     from handlers.channel_monitors import (
         run_bill_drafter_sweep, run_auto_card_sweep,
@@ -299,6 +300,26 @@ def _start_scheduler():
         name="Prospecting Signal Refresh",
     )
 
+    # Top-CP Re-engage refresh: Daily 6:00 AM PT
+    # Surfaces top 20 active (+ 10 churned) accounts by CP potential, excluding
+    # any with a closed-won expansion in the last 90 days
+    scheduler.add_job(
+        _wrap(run_top_cp_refresh),
+        CronTrigger(day_of_week="mon-fri", hour=6, minute=0),
+        id="top_cp_refresh",
+        name="Top-CP Re-engage Refresh",
+    )
+
+    # Plays refresh: Weekdays 10 AM + 2 PM PT (third layer; also runs on
+    # startup-warm + on-demand when the Prospecting tab opens with stale cache)
+    from jobs.plays_refresh import refresh_all as run_plays_refresh_all
+    scheduler.add_job(
+        _wrap(run_plays_refresh_all),
+        CronTrigger(day_of_week="mon-fri", hour="10,14", minute=0),
+        id="plays_refresh",
+        name="Plays Refresh",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(
@@ -391,6 +412,15 @@ def _start_scheduler():
         len(scheduler.get_jobs()),
         ", ".join(j.name for j in scheduler.get_jobs()),
     )
+
+    # Plays cache warm: kick off stale-refresh shortly after boot so the
+    # Prospecting tab renders instantly on the first open after a laptop wake.
+    try:
+        from jobs.plays_refresh import warm_on_startup
+        warm_on_startup(delay_sec=30)
+    except Exception as e:
+        logger.warning("Plays startup warm failed to launch: %s", e)
+
     return scheduler
 
 

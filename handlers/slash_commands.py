@@ -538,6 +538,138 @@ Be direct and specific. This is for {user["first_name"]} to glance at 2 minutes 
 
         threading.Thread(target=_run, daemon=True).start()
 
+    @app.command(cmd("refresh-help"))
+    def handle_gary_refresh_help(ack, command, client, respond):
+        """Scrape Enablement Eddy's URL responses in #gam-ask-ai and merge
+        into the help-link catalog used by email drafters' Resources section.
+
+        Produces ~/.gary_bot_eddy_links.json. Safe to re-run — updates
+        last_seen on existing entries, only adds new ones.
+
+        Requires the bot to be a member of #gam-ask-ai (C0AA27QHGDB).
+        """
+        ack()
+        user = _check_user(command, respond)
+        if not user:
+            return
+
+        respond(":books: Scraping Enablement Eddy responses for help links…")
+
+        def _run():
+            try:
+                from jobs.scrape_eddy_links import scrape_eddy_links
+                result = scrape_eddy_links()
+                client.chat_postMessage(
+                    channel=command["user_id"],
+                    text=(
+                        f":books: *Help-link catalog refreshed.*\n"
+                        f"• Total entries: {result['total']}\n"
+                        f"• New this run: {result['new']}\n\n"
+                        f"These are merged into the Resources section of "
+                        f"re-engagement + post-meeting emails alongside the "
+                        f"hardcoded catalog."
+                    ),
+                )
+            except Exception as e:
+                logger.error("gary-refresh-help failed: %s", e, exc_info=True)
+                client.chat_postMessage(
+                    channel=command["user_id"],
+                    text=(
+                        f":warning: Help-link refresh failed: {e}\n"
+                        f"Most common cause: Gary Bot isn't a member of "
+                        f"#gam-ask-ai. Invite it there and re-run."
+                    ),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    @app.command(cmd("reengage"))
+    def handle_gary_reengage(ack, command, client, respond):
+        """Draft a unified re-engagement email for an account — covers all
+        open opps, pulls recent Gong call context + email history, resolves
+        recipients via the unified resolver (SFDC contacts + Gong speakers +
+        email correspondents), produces a 4-section sales-focused email.
+
+        Usage: /{prefix}-reengage <account name or partial match>
+        Example: /gary-reengage graintree
+        """
+        ack()
+        user = _check_user(command, respond)
+        if not user:
+            return
+
+        account_query = (command.get("text") or "").strip()
+        if not account_query:
+            respond(
+                f"Usage: `/{pfx}-reengage <account name>`\n"
+                f"Example: `/{pfx}-reengage graintree` — drafts a unified re-engagement "
+                f"email covering all open opps on the account."
+            )
+            return
+
+        respond(f":mag: Resolving account *{account_query}* + drafting re-engagement email…")
+
+        def _run():
+            try:
+                from utils.account_resolver import resolve_account_name
+                from handlers.home_tab import _fetch_pipeline_data
+                from jobs.pipeline_drafter import draft_account_reengagement
+
+                # Step 1: resolve the account to an ID
+                result = resolve_account_name(None, account_query)
+                if not result:
+                    client.chat_postMessage(
+                        channel=command["user_id"],
+                        text=(f":warning: No SFDC account found matching *{account_query}* "
+                              f"in your book. Check the spelling or try a more specific name."),
+                    )
+                    return
+                account_id = result["account_id"]
+                account_name = result["account_name"]
+
+                # Step 2: pull the account's open opps from the Pipeline cache
+                df = _fetch_pipeline_data(command["user_id"])
+                opps = []
+                if df is not None and not df.empty:
+                    match = df[df["account_id"] == account_id]
+                    if not match.empty:
+                        opps = match.iloc[0].to_dict().get("opps") or []
+
+                if not opps:
+                    client.chat_postMessage(
+                        channel=command["user_id"],
+                        text=(f":information_source: *{account_name}* has no open "
+                              f"Expansion or Renewal opps in your book. Nothing to re-engage. "
+                              f"If you want a cold-outreach draft anyway, use `/{pfx}-draft` "
+                              f"instead."),
+                    )
+                    return
+
+                # Step 3: delegate to the same drafter the Pipeline tab uses
+                payload = {
+                    "account_id": account_id,
+                    "account_name": account_name,
+                    "opps": [
+                        {
+                            "opp_id": o.get("opp_id"),
+                            "product": o.get("product"),
+                            "type": o.get("type"),
+                            "stage": o.get("stage"),
+                            "next_step": o.get("next_step"),
+                        }
+                        for o in opps
+                    ],
+                }
+                draft_account_reengagement(payload, client, user_id=command["user_id"])
+            except Exception as e:
+                logger.error("reengage command failed: %s", e, exc_info=True)
+                client.chat_postMessage(
+                    channel=command["user_id"],
+                    text=f":warning: Re-engage failed: {e}",
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
     @app.command(cmd("test"))
     def handle_gary_test(ack, command, client, respond):
         """Run all jobs in test mode to verify everything works."""
@@ -1502,8 +1634,17 @@ def _handle_post_meeting_account(client, user_id, account_filter, lookback_days,
     }
     transcript_records = call_rows.sort_values("paragraph_index").to_dict("records")
 
+    # Assemble transcript text + participants list from the records
+    transcript_text = "\n".join(
+        f"{r.get('speaker_email', '?')}: {r.get('paragraph_text', '')}"
+        for r in transcript_records
+    )
+    participants = sorted({
+        r.get("speaker_email", "") for r in transcript_records if r.get("speaker_email")
+    })
+
     # Run analysis
-    analysis = _analyze_call(latest_call_id, meta, transcript_records)
+    analysis = _analyze_call(latest_call_id, meta, transcript_text, participants, user_id=query_user_id)
     if not analysis:
         client.chat_postMessage(
             channel=user_id,

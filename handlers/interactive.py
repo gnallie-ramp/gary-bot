@@ -112,7 +112,7 @@ def register_interactive_handlers(app):
 
     @app.action({"action_id": re.compile(r"^create_opp_sfdc_")})
     def handle_create_opp_sfdc(ack, body, client):
-        """Handle Create Opp button — creates opportunity directly in Salesforce via sf CLI."""
+        """Handle Create Opp button — creates opportunity in Salesforce via Growth MCP."""
         ack()
         user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
 
@@ -194,17 +194,14 @@ def register_interactive_handlers(app):
                     elif product == "Travel Expansion":
                         fields["Monthly_Travel_Bookings_Amount__c"] = amt_str
 
-                # Look up Main POC contact from account
-                if account_id:
-                    try:
-                        from core.salesforce_client import query as sf_query
-                        poc_result = sf_query(
-                            f"SELECT Main_POC__c FROM Account WHERE Id = '{account_id}'"
-                        )
-                        if poc_result and poc_result[0].get("Main_POC__c"):
-                            fields["Primary_Contact__c"] = poc_result[0]["Main_POC__c"]
-                    except Exception:
-                        pass  # Non-critical — skip if lookup fails
+                # Card + Bill Pay defaults: Timeframe of Spend = Monthly,
+                # Primary Competitor = None, Win Reason = Single tech stack solution
+                if product in ("Card Expansion", "Bill Pay Expansion"):
+                    fields["Timeframe_of_Spend__c"] = "Monthly"
+                    fields["Primary_Competitor__c"] = "None"
+                    fields["Win_Reason__c"] = "Single tech stack solution"
+
+                # Primary_Contact__c auto-defaults to Account.Main_POC__c in Growth MCP
 
                 # Pre-fill Gong call URL — use payload value or fall back to Snowflake
                 gong_url = gong_link
@@ -224,7 +221,7 @@ def register_interactive_handlers(app):
                     win_detail = f"{win_detail} — {rationale}"
                 fields["WinReasonDetail__c"] = win_detail[:500]
 
-                opp_id = create_opportunity(fields)
+                opp_id, err_msg = create_opportunity(fields)
                 if opp_id:
                     opp_link = sf_opp_url(opp_id)
                     client.chat_postMessage(
@@ -247,7 +244,7 @@ def register_interactive_handlers(app):
                 else:
                     client.chat_postMessage(
                         channel=user_id,
-                        text=f"Failed to create *{product}* opp for *{account_name}*. Check sf CLI auth: `sf org login web --alias ramp`",
+                        text=f"Failed to create *{product}* opp for *{account_name}*: {err_msg or 'unknown error'}",
                     )
             except Exception as e:
                 logger.error("SFDC opp creation failed for %s: %s", account_name, e)
@@ -310,7 +307,7 @@ def register_interactive_handlers(app):
 
         def _run():
             try:
-                from core.salesforce_client import create_opportunity, query as sf_query
+                from core.salesforce_client import create_opportunity
                 from core.slack_formatter import (
                     sf_opp_url, sf_account_url, EXPANSION_TYPE_MAP,
                     EXPANSION_PRODUCT_MAP, format_currency,
@@ -362,6 +359,14 @@ def register_interactive_handlers(app):
                     win_detail = f"{win_detail} — {notes}"
                 fields["WinReasonDetail__c"] = win_detail[:500]
 
+                # Card + Bill Pay defaults: Timeframe of Spend = Monthly,
+                # Primary Competitor = None, Win Reason = Single tech stack solution.
+                # Applied via the follow-up update_opportunities call.
+                if product in ("Card Expansion", "Bill Pay Expansion"):
+                    fields["Timeframe_of_Spend__c"] = "Monthly"
+                    fields["Primary_Competitor__c"] = "None"
+                    fields["Win_Reason__c"] = "Single tech stack solution"
+
                 if amount and float(amount) > 0:
                     amt_str = str(int(float(amount)))
                     if product == "Card Expansion":
@@ -373,17 +378,9 @@ def register_interactive_handlers(app):
                     elif product == "Travel Expansion":
                         fields["Monthly_Travel_Bookings_Amount__c"] = amt_str
 
-                # Look up Main POC contact from account
-                try:
-                    poc_result = sf_query(
-                        f"SELECT Main_POC__c FROM Account WHERE Id = '{account_id}'"
-                    )
-                    if poc_result and poc_result[0].get("Main_POC__c"):
-                        fields["Primary_Contact__c"] = poc_result[0]["Main_POC__c"]
-                except Exception:
-                    pass  # Non-critical
+                # Primary_Contact__c auto-resolved by create_opportunity when not set
 
-                opp_id = create_opportunity(fields)
+                opp_id, err_msg = create_opportunity(fields)
                 if opp_id:
                     opp_link = sf_opp_url(opp_id)
                     sf_acct = sf_account_url(account_id)
@@ -413,7 +410,7 @@ def register_interactive_handlers(app):
                         blocks=[{
                             "type": "section",
                             "text": {"type": "mrkdwn",
-                                     "text": f":x: Failed to create *{product}* opp for *{account_name}*. Check sf CLI auth: `sf org login web --alias ramp`"},
+                                     "text": f":x: Failed to create *{product}* opp for *{account_name}*: {err_msg or 'unknown error'}"},
                         }],
                         text=f"Failed to create opp for {account_name}",
                     )
@@ -529,7 +526,7 @@ def register_interactive_handlers(app):
                 else:
                     client.chat_postMessage(
                         channel=user_id,
-                        text=f"Failed to update *{product}* opp. Check sf CLI auth.",
+                        text=f"Failed to update *{product}* opp. Check Growth MCP auth in Glass.",
                     )
             except Exception as e:
                 logger.error("SFDC opp update failed for %s: %s", account_name, e)
@@ -824,25 +821,28 @@ def register_interactive_handlers(app):
             )
             return
 
-        # Procurement trial uses fixed template (matches channel alert), not Claude-generated
-        if category == "prospect_active_procurement_trial":
+        trial_end = payload.get("trial_end", "")
+
+        # Trial categories use fixed templates, not Claude-generated
+        if category in ("prospect_active_procurement_trial", "plus_trial"):
+            trial_label = "procurement" if category == "prospect_active_procurement_trial" else "Plus"
             client.chat_postMessage(
                 channel=user_id,
-                text=f"Drafting procurement trial email for *{account_name}*...",
+                text=f"Drafting {trial_label} trial email for *{account_name}*...",
             )
 
-            def _run_procurement():
+            def _run_trial(cat=category, t_end=trial_end):
                 with _draft_semaphore:
                     try:
-                        _draft_procurement_trial_template(account_id, account_name, client, user_id=user_id)
+                        _draft_trial_template(cat, account_id, account_name, t_end, client, user_id=user_id)
                     except Exception as e:
-                        logger.error("Procurement trial draft failed for %s: %s", account_name, e)
+                        logger.error("Trial draft failed for %s: %s", account_name, e)
                         client.chat_postMessage(
                             channel=user_id,
                             text=f"Failed to draft email for *{account_name}*: {e}",
                         )
 
-            threading.Thread(target=_run_procurement, daemon=True).start()
+            threading.Thread(target=_run_trial, daemon=True).start()
             return
 
         client.chat_postMessage(
@@ -1241,6 +1241,195 @@ def register_interactive_handlers(app):
 
         threading.Thread(target=_refresh, daemon=True).start()
 
+    # ── Top-CP Re-engage overflow menu ───────────────────────────────
+
+    @app.action({"action_id": re.compile(r"^top_cp_overflow_")})
+    def handle_top_cp_overflow(ack, body, client):
+        """Handle Top-CP overflow menu: draft email, snooze 30d, or view in SFDC."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        action = body.get("actions", [{}])[0]
+        selected = action.get("selected_option", {}).get("value", "{}")
+        try:
+            payload = json.loads(selected)
+        except json.JSONDecodeError:
+            payload = {}
+
+        op = payload.get("op", "")
+        account_id = payload.get("account_id", "")
+        account_name = payload.get("account", "Unknown")
+
+        if not account_id:
+            client.chat_postMessage(channel=user_id, text="Could not identify the account.")
+            return
+
+        if op == "view":
+            from core.slack_formatter import sf_account_url
+            url = sf_account_url(account_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":bust_in_silhouette: *{account_name}* — <{url}|Open in Salesforce>",
+            )
+            return
+
+        if op == "snooze":
+            from utils.snooze import snooze_account
+            snooze_account(account_id, days=30, user_id=user_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":zzz: Snoozed *{account_name}* from Top-CP for 30 days.",
+            )
+
+            def _refresh_home():
+                try:
+                    from handlers.home_tab import _build_home_blocks
+                    blocks = _build_home_blocks(client, user_id)
+                    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+                except Exception as e:
+                    logger.error("Home refresh after Top-CP snooze failed: %s", e)
+
+            threading.Thread(target=_refresh_home, daemon=True).start()
+            return
+
+        if op == "draft":
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"Drafting Top-CP re-engage email for *{account_name}*...",
+            )
+
+            def _draft():
+                with _draft_semaphore:
+                    try:
+                        _draft_top_cp_reengage(account_id, account_name, client, user_id=user_id)
+                    except Exception as e:
+                        logger.error("Top-CP draft failed for %s: %s", account_name, e)
+                        client.chat_postMessage(
+                            channel=user_id,
+                            text=f"Failed to draft Top-CP email for *{account_name}*: {e}",
+                        )
+
+            threading.Thread(target=_draft, daemon=True).start()
+            return
+
+    # ── Plays sub-section (Prospecting tab) ──────────────────────────
+
+    @app.action({"action_id": re.compile(r"^plays_toggle_")})
+    def handle_plays_toggle(ack, body, client):
+        """Expand/collapse a play row in the Prospecting tab."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        play_id = action.get("value") or ""
+        if not play_id:
+            return
+
+        from handlers.home_tab import _plays_expanded
+        expanded = _plays_expanded.setdefault(user_id, set())
+        if play_id in expanded:
+            expanded.remove(play_id)
+        else:
+            expanded.add(play_id)
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after plays toggle failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action({"action_id": re.compile(r"^plays_overflow_")})
+    def handle_plays_overflow(ack, body, client):
+        """Overflow menu on a Plays card: draft re-engage / snooze 30d / view SFDC."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        selected = action.get("selected_option", {}).get("value", "{}")
+        try:
+            payload = json.loads(selected)
+        except json.JSONDecodeError:
+            payload = {}
+
+        op = payload.get("op", "")
+        play_id = payload.get("play_id", "")
+        account_id = payload.get("account_id", "")
+        account_name = payload.get("account", "Unknown")
+
+        if not account_id:
+            client.chat_postMessage(channel=user_id, text="Could not identify the account.")
+            return
+
+        if op == "view":
+            from core.slack_formatter import sf_account_url
+            url = sf_account_url(account_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":bust_in_silhouette: *{account_name}* — <{url}|Open in Salesforce>",
+            )
+            return
+
+        if op == "snooze":
+            from utils.snooze import snooze_play_account
+            snooze_play_account(play_id, account_id, days=30, user_id=user_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":zzz: Snoozed *{account_name}* from play {play_id} for 30 days.",
+            )
+
+            def _refresh():
+                try:
+                    from handlers.home_tab import _build_home_blocks
+                    blocks = _build_home_blocks(client, user_id)
+                    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+                except Exception as e:
+                    logger.error("Home refresh after plays snooze failed: %s", e)
+
+            threading.Thread(target=_refresh, daemon=True).start()
+            return
+
+        if op == "draft":
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"Drafting re-engage email for *{account_name}* (play {play_id})…",
+            )
+
+            def _draft():
+                with _draft_semaphore:
+                    try:
+                        # Pull the account's row from the Plays cache so the
+                        # drafter can access per-play signal fields (po_bill_count,
+                        # erp_snippet, card_gap_cp, etc.) for the pitch hook.
+                        from jobs.plays_refresh import get_cached_play
+                        play_row = {}
+                        cached = get_cached_play(play_id, user_id=user_id)
+                        if cached:
+                            for r in cached.get("rows", []):
+                                if r.get("account_id") == account_id:
+                                    play_row = r
+                                    break
+
+                        from jobs.pipeline_drafter import draft_account_reengagement
+                        payload_dict = {
+                            "account_id": account_id,
+                            "account_name": account_name,
+                            "play_id": play_id,
+                            "play_row": play_row,
+                            "category": "plays",
+                        }
+                        draft_account_reengagement(payload_dict, client, user_id=user_id)
+                    except Exception as e:
+                        logger.error("Plays draft failed for %s (play=%s): %s", account_name, play_id, e)
+                        client.chat_postMessage(
+                            channel=user_id,
+                            text=f"Failed to draft email for *{account_name}*: {e}",
+                        )
+
+            threading.Thread(target=_draft, daemon=True).start()
+            return
+
     # ── App mention ──────────────────────────────────────────────────
 
     @app.event("app_mention")
@@ -1287,18 +1476,19 @@ def _send_category_detail(client, category: str, user_id=None):
 # ── Procurement Trial Template Drafter ──────────────────────────────────────
 
 
-def _draft_procurement_trial_template(account_id, account_name, client, user_id=None):
-    """Draft a procurement trial email using the fixed template (same as channel alert).
+def _draft_trial_template(category, account_id, account_name, trial_end, client, user_id=None):
+    """Draft a trial email using the fixed template for Plus or Procurement.
 
-    Fetches contacts from SFDC, builds greeting, and uses the standard
-    procurement_trial_email template — no Claude generation, no context gathering.
+    Fetches contacts from SFDC, builds greeting, and uses the appropriate
+    fixed template — no Claude generation, no context gathering.
     """
     dm_target = user_id or GREG_SLACK_ID
-    from templates.emails import procurement_trial_email
+    from templates.emails import procurement_trial_intro_email, plus_trial_intro_email
     from utils.account_resolver import fetch_contact_emails, is_hash_like
     from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
     from core.slack_formatter import drafter_confirmation_blocks
-    from core.user_registry import get_user_first_name
+
+    is_procurement = category == "prospect_active_procurement_trial"
 
     # Fetch contacts
     contacts_map = fetch_contact_emails(None, [account_id])
@@ -1326,18 +1516,23 @@ def _draft_procurement_trial_template(account_id, account_name, client, user_id=
             break
     to_emails = ", ".join(c["email"] for c in domain_matched)
     first_names = [c.get("name", "").split()[0] for c in domain_matched if c.get("name")]
-    if len(first_names) == 0:
-        greeting = "Hi there,"
-    elif len(first_names) == 1:
-        greeting = f"Hi {first_names[0]},"
-    elif len(first_names) == 2:
-        greeting = f"Hi {first_names[0]} and {first_names[1]},"
-    else:
-        greeting = f"Hi {', '.join(first_names[:-1])}, and {first_names[-1]},"
 
-    html_body = procurement_trial_email(greeting=greeting, user_id=user_id)
-    subject = "Ramp Procurement Trial + AM intro"
-    draft_label = "Claude Drafts/Procurement Trials"
+    primary_first = first_names[0] if first_names else "there"
+
+    if is_procurement:
+        html_body = procurement_trial_intro_email(
+            first_name=primary_first, user_id=user_id, trial_end=trial_end,
+        )
+        subject = f"Ramp AM Intro & Procurement Trial Ending on {trial_end}" if trial_end else "Ramp AM Intro & Procurement Trial"
+        draft_label = "Claude Drafts/Procurement Trials"
+        drafter_label = "Procurement Trial"
+    else:
+        html_body = plus_trial_intro_email(
+            first_name=primary_first, user_id=user_id, trial_end=trial_end,
+        )
+        subject = f"Ramp AM Intro & Plus Trial Ending on {trial_end}" if trial_end else "Ramp AM Intro & Plus Trial"
+        draft_label = "Claude Drafts/Plus Trials"
+        drafter_label = "Plus Trial"
 
     draft_id = ""
     if gumstack_ok():
@@ -1352,7 +1547,7 @@ def _draft_procurement_trial_template(account_id, account_name, client, user_id=
 
     if not draft_id:
         from utils.pending_drafts import save_draft as save_pending_draft
-        draft_id = f"pending_procurement_{account_id}_{int(time.time())}"
+        draft_id = f"pending_trial_{account_id}_{int(time.time())}"
         save_pending_draft(
             draft_id=draft_id, to=to_emails, cc="",
             subject=subject, html_body=html_body,
@@ -1362,17 +1557,98 @@ def _draft_procurement_trial_template(account_id, account_name, client, user_id=
     details = (
         f"*To:* {to_emails}\n"
         f"*Subject:* {subject}\n"
-        f"*Account:* {account_name} — Procurement Trial"
+        f"*Account:* {account_name} — {drafter_label}"
     )
     blocks = drafter_confirmation_blocks(
-        drafter_type="Procurement Trial",
+        drafter_type=drafter_label,
         account_name=account_name,
         details=details,
         draft_id=draft_id,
     )
     client.chat_postMessage(
         channel=dm_target, blocks=blocks,
-        text=f"Procurement Trial draft ready for {account_name}",
+        text=f"{drafter_label} draft ready for {account_name}",
+    )
+
+
+# ── Top-CP Re-engage Drafter ────────────────────────────────────────────────
+
+
+def _draft_top_cp_reengage(account_id, account_name, client, user_id=None):
+    """Draft a Top-CP re-engage email using the fixed template.
+
+    Mirrors the Plus/Procurement trial drafter pattern: pull valid contacts,
+    domain-match to avoid cc'ing wrong companies, call the template, create a
+    Gmail draft (or queue locally), and DM a confirmation back.
+    """
+    dm_target = user_id or GREG_SLACK_ID
+    from templates.emails import top_cp_reengage_email
+    from utils.account_resolver import fetch_contact_emails, is_hash_like
+    from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
+    from core.slack_formatter import drafter_confirmation_blocks
+
+    contacts_map = fetch_contact_emails(None, [account_id])
+    acct_contacts = contacts_map.get(account_id, [])
+    valid = [c for c in acct_contacts if c.get("email") and not is_hash_like(c.get("name", ""))]
+    if not valid:
+        client.chat_postMessage(
+            channel=dm_target,
+            text=f"No contact email found for *{account_name}*. Add a contact in Salesforce first.",
+        )
+        return
+
+    primary_domain = valid[0]["email"].lower().split("@")[-1] if "@" in valid[0]["email"] else ""
+    domain_matched = [valid[0]]
+    for c in valid[1:]:
+        em = c["email"].lower()
+        d = em.split("@")[-1] if "@" in em else ""
+        if primary_domain and d and d != primary_domain:
+            continue
+        domain_matched.append(c)
+        if len(domain_matched) >= 4:
+            break
+    to_emails = ", ".join(c["email"] for c in domain_matched)
+    primary_first = (domain_matched[0].get("name", "") or "").split()[0] or "there"
+
+    greeting = f"Hi {primary_first},"
+    html_body = top_cp_reengage_email(greeting=greeting, user_id=user_id)
+    subject = f"Quick check in — a few ways to get more out of Ramp"
+    draft_label = "Claude Drafts/Top-CP Re-engage"
+
+    draft_id = ""
+    if gumstack_ok():
+        result = gumstack_create(
+            to=to_emails, subject=subject, html_body=html_body,
+            cc="", label=draft_label, user_id=user_id,
+        )
+        if result.get("success"):
+            draft_id = result.get("draft_id", "")
+        else:
+            logger.warning("Gumstack draft failed for %s Top-CP — queuing locally", account_name)
+
+    if not draft_id:
+        from utils.pending_drafts import save_draft as save_pending_draft
+        draft_id = f"pending_top_cp_{account_id}_{int(time.time())}"
+        save_pending_draft(
+            draft_id=draft_id, to=to_emails, cc="",
+            subject=subject, html_body=html_body,
+            account_name=account_name, label=draft_label, user_id=user_id or "",
+        )
+
+    details = (
+        f"*To:* {to_emails}\n"
+        f"*Subject:* {subject}\n"
+        f"*Account:* {account_name} — Top-CP Re-engage"
+    )
+    blocks = drafter_confirmation_blocks(
+        drafter_type="Top-CP Re-engage",
+        account_name=account_name,
+        details=details,
+        draft_id=draft_id,
+    )
+    client.chat_postMessage(
+        channel=dm_target, blocks=blocks,
+        text=f"Top-CP Re-engage draft ready for {account_name}",
     )
 
 
@@ -1488,6 +1764,7 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     owner_name = get_user_sf_name(user_id)
     first_name_owner = get_user_first_name(user_id)
     booking_link = get_user_booking_link(user_id)
+    owner_email = get_user_email(user_id) if user_id else ""
     from core.snowflake_client import run_query
     from core.claude_client import call_claude
     from core.gumstack_gmail import create_draft as gumstack_create, is_available as gumstack_ok
@@ -1505,6 +1782,8 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         return fetch_contact_emails(None, [account_id]).get(account_id, [])
 
     def _fetch_gong():
+        # Include user_was_participant flag to distinguish user's calls from other Ramp team's calls
+        _owner_email_escaped = owner_email.replace("'", "''").lower() if owner_email else ""
         gong_query = f"""
         SELECT
             gt.call_name,
@@ -1521,11 +1800,16 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
             LISTAGG(
                 CASE WHEN gs.section_text IS NOT NULL AND gs.section_text != ''
                      THEN gs.section_name || ': ' || LEFT(gs.section_text, 400) END, ' || '
-            ) WITHIN GROUP (ORDER BY gs.section_index) AS call_summary
+            ) WITHIN GROUP (ORDER BY gs.section_index) AS call_summary,
+            MAX(CASE WHEN ramp_p.speaker_email IS NOT NULL
+                      AND LOWER(ramp_p.speaker_email) = '{_owner_email_escaped}'
+                     THEN 1 ELSE 0 END) AS user_was_participant
         FROM analytics.marts.dim_sfdc_gong_transcripts gt
         LEFT JOIN analytics.marts.dim_gong_section_summary gs ON gs.call_id = gt.call_id
         LEFT JOIN analytics.marts.dim_gong_transcript_paragraph gp
             ON gp.call_id = gt.call_id AND gp.is_ramp_participant = FALSE
+        LEFT JOIN analytics.marts.dim_gong_transcript_paragraph ramp_p
+            ON ramp_p.call_id = gt.call_id AND ramp_p.is_ramp_participant = TRUE
         WHERE gt.account_id = '{account_id}'
           AND gt.call_start >= DATEADD('day', -90, CURRENT_DATE)
           AND gt.call_duration_sec >= 180
@@ -1571,8 +1855,8 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     logger.info("Draft %s: parallel fetch done in %.1fs", account_name, _time.time() - _t0)
     _t1 = _time.time()
 
-    # Parse Gong results
-    gong_participants = set()
+    # Parse Gong results — only mark contacts as "met" from calls where user was present
+    gong_participants = set()  # contacts the user has personally met (for scoring + opening)
     gong_context = ""
     last_call_name = ""
     last_call_date = ""
@@ -1581,23 +1865,35 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     if gong_df is not None and not gong_df.empty:
         parts = []
         for _, row in gong_df.iterrows():
+            was_participant = int(row.get("user_was_participant", 0) or 0)
             ext_emails = str(row.get("external_emails", "") or "")
-            for em in ext_emails.split(","):
-                em = em.strip().lower()
-                if em and "@" in em:
-                    gong_participants.add(em)
+            # Only count contacts as "met" if the user was actually on the call
+            if was_participant:
+                for em in ext_emails.split(","):
+                    em = em.strip().lower()
+                    if em and "@" in em:
+                        gong_participants.add(em)
             call_name = row.get("call_name", "")
             call_date = str(row.get("call_date", ""))
             summary = str(row.get("call_summary", "") or "")[:800]
-            if not last_call_name:
+            call_label = "[Your call]" if was_participant else "[Other Ramp team's call]"
+            if not last_call_name and was_participant:
+                # Only use user's own calls for "last call" context
                 last_call_name = call_name
                 last_call_date = call_date
                 product_requests = str(row.get("product_requests", "") or "")
                 competitors = str(row.get("competitors", "") or "")
-            parts.append(f"--- {call_name} ({call_date}) ---\n{summary}")
+            parts.append(f"--- {call_label} {call_name} ({call_date}) ---\n{summary}")
         gong_context = "\n\n".join(parts)
+        # If user wasn't on any calls, still grab product requests/competitors from latest call
+        if not last_call_name and not gong_df.empty:
+            first_row = gong_df.iloc[0]
+            product_requests = str(first_row.get("product_requests", "") or "")
+            competitors = str(first_row.get("competitors", "") or "")
 
     # ── 3. Smart contact selection: TO = best primary, CC = additional stakeholders ──
+    from utils.contact_scoring import select_recipients
+
     # Build engagement signals from emails and Gong
     email_correspondents = set()
     if emails_df is not None and not emails_df.empty:
@@ -1606,72 +1902,23 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
             if ext_email and "@" in ext_email:
                 email_correspondents.add(ext_email)
 
-    # Title-based classification
-    _OWNER_TITLES = re.compile(
-        r'\b(owner|ceo|president|founder|principal|cfo|vp.?finance|'
-        r'chief.?financial|controller|director.?of.?finance|managing.?partner|'
-        r'partner|dentist|doctor|physician|managing.?director)\b', re.IGNORECASE
-    )
-    _ADMIN_TITLES = re.compile(
-        r'\b(admin|administrator|ap.?manager|accounting.?manager|'
-        r'office.?manager|bookkeeper|accounts.?payable|billing|'
-        r'operations.?manager|finance.?manager|staff.?accountant|'
-        r'practice.?manager)\b', re.IGNORECASE
+    primary, cc_contacts = select_recipients(
+        acct_contacts,
+        gong_participants=gong_participants,
+        email_correspondents=email_correspondents,
+        max_cc=3,
     )
 
-    # Score each contact for ranking
-    def _contact_score(c):
-        """Higher = better candidate for TO. Returns (score, contact_dict)."""
-        email = (c.get("email") or "").strip().lower()
-        title = c.get("title") or ""
-        if not email or is_hash_like(c.get("name", "")):
-            return -1
-        score = 0
-        if _OWNER_TITLES.search(title):
-            score += 100  # business owner / decision-maker
-        if email in gong_participants:
-            score += 50   # met recently on a call
-        if email in email_correspondents:
-            score += 30   # recent email comms
-        if _ADMIN_TITLES.search(title):
-            score += 20   # admin / AP / finance
-        return score
-
-    scored = [(c, _contact_score(c)) for c in acct_contacts]
-    scored = [(c, s) for c, s in scored if s >= 0]
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    if not scored:
+    if not primary:
         client.chat_postMessage(
             channel=dm_target,
             text=f"No contact email found for *{account_name}*. Add a contact in Salesforce first.",
         )
         return
 
-    # TO = highest-scored contact
-    primary = scored[0][0]
     contact_email = primary["email"]
     contact_name = primary.get("name", "")
     contact_title = primary.get("title", "")
-
-    # CC = other SFDC contacts (up to 3), deduplicated by email.
-    # Domain-match guard: only CC contacts whose email domain matches the TO
-    # contact's domain to avoid emailing wrong-company contacts on the account.
-    cc_contacts = []
-    seen_emails = {contact_email.lower()}
-    to_domain = contact_email.lower().split("@")[-1] if "@" in contact_email else ""
-    for c, s in scored[1:]:
-        em = c["email"].lower()
-        cc_domain = em.split("@")[-1] if "@" in em else ""
-        if em in seen_emails:
-            continue
-        if to_domain and cc_domain and cc_domain != to_domain:
-            logger.debug("CC skip %s: domain %s != TO domain %s", em, cc_domain, to_domain)
-            continue
-        cc_contacts.append(c)
-        seen_emails.add(em)
-        if len(cc_contacts) >= 3:
-            break
     cc_string = ", ".join(c["email"] for c in cc_contacts)
 
     # Parse SFDC notes
@@ -1718,30 +1965,27 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         tone_note = "Congratulate on the activation naturally, then pivot to how you can help them get more value."
     elif category == "early_accel":
         goal = (
-            "reach out to an account whose spend is accelerating sharply in the last 7 days — "
-            "the L30D baseline is still low, so this is the best time to create and close an expansion opp. "
-            "There is no open opportunity yet"
+            "reach out because their usage of this product has been growing recently — "
+            "a great time to connect and make sure they're getting the most out of Ramp"
         )
-        tone_note = "Lead with their growth on Ramp, then offer to help them optimize or expand. Urgency: the window is open NOW."
+        tone_note = "Lead with their growth on Ramp, then offer to help them optimize. Mention vendor audits, best practices, or setup improvements that could help them."
     elif category == "leading":
         goal = (
-            "reach out because large bills or card transactions are incoming that exceed typical monthly volume — "
-            "this is a leading indicator of a spend ramp. No open opp yet"
+            "reach out because their activity on Ramp is picking up — larger transactions or bills "
+            "that suggest growing usage. A good time to introduce yourself and offer help"
         )
-        tone_note = "Lead with their growth, mention you noticed increased activity. Suggest a quick call to discuss expansion."
+        tone_note = "Lead with their increased activity. Offer to help them get more value from Ramp — vendor audits, best practices, setup optimization."
     elif category == "first_bill":
         goal = (
-            "reach out about their first bill payment in Ramp — they just started using bill pay. "
-            "There is an open bill pay opp"
+            "reach out about their first bill payment in Ramp — they just started using bill pay"
         )
         tone_note = "Congratulate on getting started with bill pay. Offer to help them ramp up and get more value."
     elif category == "sustained_accel":
         goal = (
-            "reach out to an account whose spend has been elevated for a while — "
-            "the L30D baseline is catching up to the L7D pacing, meaning the window to lock in a low baseline "
-            "is closing. Create and close an opp soon"
+            "reach out because their usage has been consistently strong — they're clearly getting value "
+            "from Ramp and it's a great time to connect and discuss how to optimize further"
         )
-        tone_note = "Lead with their sustained growth on Ramp. Frame urgency around locking in current rates/baseline."
+        tone_note = "Lead with their sustained growth on Ramp. Offer to help them make the most of it — vendor audits, consolidation, setup improvements."
     elif category == "prospect":
         goal = (
             "reach out to an account whose spend is accelerating — they may need an expansion opp. "
@@ -1813,16 +2057,16 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         tone_note = "Celebrate the milestone. Ask about their AP workflow and how many vendors they plan to move to Ramp. Offer to help optimize their bill pay setup."
     elif category == "close_window":
         goal = (
-            "reach out urgently because their spend is ramping up right now and you need to close "
-            "the expansion opportunity before the baseline rises. Time is critical."
+            "reach out because their Ramp usage is ramping up nicely right now — great time to "
+            "connect and make sure they're set up to get the most value as they grow"
         )
-        tone_note = "Frame as wanting to lock in their current pricing/baseline. Be direct about scheduling a quick call this week."
+        tone_note = "Frame as wanting to help them optimize while they're growing. Be direct about scheduling a quick call this week."
     elif category == "close_now":
         goal = (
-            "reach out because their spend has already exceeded baseline and the expansion opportunity "
-            "needs to be closed ASAP to capture the CP. Every day of delay costs money."
+            "reach out because they're clearly getting strong value from Ramp — their usage has "
+            "been growing and it's a great time to connect and discuss how to maximize that"
         )
-        tone_note = "Frame as finalizing their expansion — they're already seeing great results. Push for same-day or next-day close."
+        tone_note = "Frame around their success — they're already seeing great results. Push for a call to discuss optimizing further."
     elif category == "reopen":
         goal = (
             "re-engage about their product usage after a previous expansion opp was closed. "
@@ -1832,12 +2076,10 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
         tone_note = "Reference their history with the product naturally. Frame it as a check-in, not a re-sell."
     elif category == "treasury_spike":
         goal = (
-            "reach out because their treasury balance just spiked significantly — "
-            "L7D average is more than double the L30D average, indicating a large deposit or cash movement. "
-            "This is the best time to create a treasury expansion opp while the balance is high. "
-            "Treasury is uncapped in H1-26 so this is high-value"
+            "reach out because their treasury balance has grown significantly recently — "
+            "a great time to discuss how to optimize their cash management and get more yield from idle funds"
         )
-        tone_note = "Lead with their growth/success. Mention treasury optimization naturally. Be direct about scheduling a quick call."
+        tone_note = "Lead with their growth/success. Mention treasury optimization and yield opportunities naturally. Be direct about scheduling a quick call."
     elif category in ("underperforming_d30", "underperforming_d60"):
         checkpoint = "D30" if category == "underperforming_d30" else "D60"
         days_left = "60" if category == "underperforming_d30" else "30"
@@ -1896,7 +2138,9 @@ def _draft_smart_email(account_id, account_name, opp_id, product, category, clie
     logger.info("Draft %s: contact selection done in %.1fs", account_name, _time.time() - _t1)
     _t2 = _time.time()
 
-    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, {goal}.
+    prompt = f"""You are helping {owner_name}, a Growth Account Manager at Ramp, write an outreach email.
+
+GOAL: {goal}
 
 Account: {account_name}
 Product: {product or 'Expansion'}
@@ -1917,36 +2161,34 @@ Competitors mentioned:
 Recent Email History:
 {email_comms if email_comms else 'No recent emails'}
 
-Write a fully contextual email from {first_name_owner} to {first_name or 'the contact'}. {tone_note}
+Write an outreach email from {first_name_owner} to {first_name or 'the contact'}. {tone_note}
 
 OPENING: {opening_instruction}
 
-BODY — Write 2-4 short paragraphs that are ENTIRELY driven by the context above. Do NOT use generic bullet points. Instead:
+BODY — Blend two things:
 
-1. Reference what was specifically discussed on the last call or in recent emails — topics, pain points, product requests, tools mentioned. Be specific: name the product, the integration, the competitor, the workflow issue. If they mentioned a specific problem (e.g. "QuickBooks sync not working post-migration"), reference it directly.
+1. AM VALUE PROP: Position {first_name_owner} as a helpful resource. Mention specific ways the AM can help: vendor audits to find cashback opportunities, best practices for their Ramp setup, help consolidating spend, optimizing workflows, or getting more out of products they're already using. Frame these around THEIR benefit, not yours.
 
-2. If competitors were mentioned (e.g. Bill.com, Brex), acknowledge them naturally and position how Ramp addresses the gap — don't trash them, just show the alternative.
+2. SIGNAL CONTEXT: Tie the outreach to what you're actually seeing on their account — the spend trend, the product activation, the bill pay growth, whatever triggered this email. Be specific: reference real numbers, products, or patterns from the data above. This makes the email feel relevant and timely, not generic.
 
-3. If there are open items or unanswered questions from past conversations, address them. If they replied and you haven't responded, acknowledge the gap.
+If there's Gong call or email context, weave it in naturally — reference topics discussed, pain points raised, or questions asked. If competitors were mentioned, acknowledge them naturally and position how Ramp addresses the gap.
 
-4. Connect back to the opp objective: why this matters for them (not for you). Frame the value of reconnecting around THEIR needs that surfaced in past conversations.
-
-5. End with a clear, specific CTA. Propose a quick call to discuss the specific topics you just referenced, not a generic "catch up." Include booking link: <a href="{booking_link}">this link</a>
+End with a clear, specific CTA. Push for a 15-minute call. Include booking link: <a href="{booking_link}">this link</a>
 
 SIGN OFF: "Best,<br>{first_name_owner}"
 
 Rules:
-- Every sentence should reference something specific from the context above — if you can't tie it to a real data point, cut it
-- NO generic filler like "optimize your setup", "maximize value", "best practices", "roadmap for 2026"
-- NO hardcoded bullet point lists — if you use bullets, they must be specific to this account's situation
-- Tone: warm, helpful, consultative — like a trusted advisor checking in, not a sales template
+- Tone: warm, direct, helpful — like a trusted advisor, not a sales template
+- Contractions are natural ("I'd", "you're", "we'll")
+- 100-150 words. Every word earns its spot.
 - Return ONLY the email body as HTML (use <p>, <strong>, <ul>/<li>, <a>, <br> tags)
 - Do NOT include a subject line — it will be generated separately
-- Keep it concise: 100-200 words. Shorter is better. Every word should earn its place.
-- If there is genuinely no context available (no calls, no emails, no notes), then and ONLY then write a brief intro email asking to connect. But this should be rare given the data above."""
+- Do NOT say "I was notified", "I was alerted", or anything implying an automated alert triggered this email
+- Do NOT guilt-trip about unanswered outbound emails ("I noticed you haven't replied"). If there's an open thread, pick it up naturally without calling out the silence.
+- If Gong call context is marked as "[Other Ramp team's call]", do NOT say "we discussed" or "following up from our call." Say "I know the team has been in touch" or reference topics without claiming you were there.
+- If there is genuinely no context (no calls, no emails, no notes), write a brief AM intro asking to connect."""
 
     # ── 5. Search for existing thread + generate email body in parallel ──
-    owner_email = get_user_email(user_id) if user_id else ""
     thread_info = None
     _thread_categories = ("stale", "followup", "reopen", "close_window", "close_now")
 

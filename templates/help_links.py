@@ -146,6 +146,48 @@ HELP_ARTICLES = {
 }
 
 
+import json as _json
+import os as _os
+import re as _re
+
+# Topic groups for deduplication — entries sharing a topic won't both appear
+_TOPIC_MAP = {
+    "bill_pay_setup": "bill_pay", "bill_pay_card_payment": "bill_pay",
+    "bill_pay_recurring": "bill_pay", "bill_pay_tax": "bill_pay",
+    "bill_pay_ocr": "bill_pay", "ap_aging": "bill_pay",
+    "bill_pay_amortization": "bill_pay",
+    "three_way_match": "procurement",
+    "card_payable_bills": "card", "corporate_card": "card",
+    "accounting_overview": "accounting",
+}
+
+_EDDY_CACHE_FILE = _os.path.expanduser("~/.gary_bot_eddy_links.json")
+
+
+def _load_eddy_articles() -> dict:
+    """Load Eddy-scraped help articles (same shape as HELP_ARTICLES).
+
+    Silently returns {} if cache missing or malformed — Eddy scrape is optional
+    enrichment, not a required dependency.
+    """
+    try:
+        with open(_EDDY_CACHE_FILE) as f:
+            data = _json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            return data
+    except (FileNotFoundError, _json.JSONDecodeError, OSError):
+        return {}
+
+
+def _keyword_matches(keyword, text_lower):
+    """Check if a keyword matches in text. Word-boundary matching for short keywords."""
+    kw = keyword.lower()
+    if len(kw) <= 3:
+        return bool(_re.search(r'\b' + _re.escape(kw) + r'\b', text_lower))
+    return kw in text_lower
+
+
 def find_relevant_links(text, max_links=4):
     """Find help articles and product pages relevant to the given text.
 
@@ -160,14 +202,15 @@ def find_relevant_links(text, max_links=4):
     -------
     list[dict]
         List of dicts with keys: url, title, source ("help" or "product").
-        Ordered by relevance (number of keyword matches).
+        Ordered by relevance (minimum 2 keyword matches required).
     """
     text_lower = text.lower()
     scored = []
+    seen_urls = set()
 
     for key, entry in HELP_ARTICLES.items():
-        hits = sum(1 for kw in entry["keywords"] if kw.lower() in text_lower)
-        if hits > 0:
+        hits = sum(1 for kw in entry["keywords"] if _keyword_matches(kw, text_lower))
+        if hits >= 2:  # Require 2+ keyword matches to avoid false positives
             scored.append({
                 "url": entry["url"],
                 "title": entry["title"],
@@ -175,10 +218,11 @@ def find_relevant_links(text, max_links=4):
                 "score": hits,
                 "key": key,
             })
+            seen_urls.add(entry["url"])
 
     for key, entry in PRODUCT_PAGES.items():
-        hits = sum(1 for kw in entry["keywords"] if kw.lower() in text_lower)
-        if hits > 0:
+        hits = sum(1 for kw in entry["keywords"] if _keyword_matches(kw, text_lower))
+        if hits >= 2:
             scored.append({
                 "url": entry["url"],
                 "title": entry["title"],
@@ -186,18 +230,37 @@ def find_relevant_links(text, max_links=4):
                 "score": hits,
                 "key": key,
             })
+            seen_urls.add(entry["url"])
+
+    # Merge Eddy-scraped entries (from #gam-ask-ai). Same shape as HELP_ARTICLES.
+    # Require same 2-keyword threshold; skip URLs already matched above.
+    for key, entry in _load_eddy_articles().items():
+        url = entry.get("url")
+        if not url or url in seen_urls:
+            continue
+        keywords = entry.get("keywords") or []
+        hits = sum(1 for kw in keywords if _keyword_matches(kw, text_lower))
+        if hits >= 2:
+            # Slight score penalty so hardcoded help articles win ties —
+            # those have been vetted; Eddy entries are auto-classified.
+            scored.append({
+                "url": url,
+                "title": entry.get("title", "Ramp resource"),
+                "source": "eddy",
+                "score": hits - 0.5,
+                "key": f"eddy_{key}",
+            })
+            seen_urls.add(url)
 
     # Sort by score descending, prefer help articles over product pages at same score
     scored.sort(key=lambda x: (x["score"], x["source"] == "help"), reverse=True)
 
-    # Deduplicate: if both a help article and product page cover the same topic,
-    # keep the help article (more specific / useful to the customer)
+    # Deduplicate by topic: keep the highest-scored entry per topic
     seen_topics = set()
     results = []
     for item in scored:
-        # Group by rough topic area
-        topic = item["key"].split("_")[0]
-        if topic not in seen_topics or item["source"] == "help":
+        topic = _TOPIC_MAP.get(item["key"], item["key"])
+        if topic not in seen_topics:
             seen_topics.add(topic)
             results.append({
                 "url": item["url"],

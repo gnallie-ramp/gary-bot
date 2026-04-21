@@ -601,6 +601,206 @@ LEFT JOIN card_spend cs ON cs.account_id = av.account_id
 ORDER BY av.l30_ach_spend DESC
 """
 
+
+# ── ALL_PIPELINE_ACCOUNTS_QUERY ──────────────────────────────────────────────
+# Powers the Pipeline tab. Returns one row per account with ≥1 open Expansion
+# or Renewal opp, with the account's opps rolled up into a JSON array, plus
+# account-level engagement (last email + last Gong call). Sum of opps' est_cp
+# yields the account's total potential CP for sort ordering.
+#
+# Fields returned (lowercase after run_query):
+#   account_id, account_name, open_opp_count, total_est_cp,
+#   soonest_close_date, opps (JSON array — each opp has: opportunity_id,
+#   opportunity_type, expansion_product, stage_name, close_date,
+#   monthly_expansion_amount, next_step, expansion_notes, est_cp),
+#   opp_types_pipe, opp_products_pipe, opp_stages_pipe (pipe-delimited strings
+#   for fast Python membership filtering),
+#   last_email_date, last_email_subject, last_email_direction, last_email_contact,
+#   last_call_id, last_call_title, last_call_date, last_call_url, last_call_summary,
+#   last_touch_date, days_since_touch (NULL when no engagement)
+#
+# Renewal est_cp is 0 here (Snowflake lacks reliable renewal ACV).
+# Summarizer job enriches with live ACV later.
+ALL_PIPELINE_ACCOUNTS_QUERY = """
+WITH base_opps AS (
+    SELECT
+        o.opportunity_id,
+        o.account_id,
+        o.opportunity_type,
+        o.opportunity_stage_name AS stage_name,
+        o.opportunity_close_date AS close_date,
+        o.monthly_expansion_amount,
+        o.expansion_product,
+        o.expansion_notes,
+        o.next_step,
+        o.total_expansion_est_cp,
+        a.account_name,
+        GREATEST(
+            CASE
+                WHEN o.opportunity_type = 'Expansion' THEN
+                    COALESCE(o.monthly_expansion_amount, 0) * CASE o.expansion_product
+                        WHEN 'Card'        THEN 0.0095
+                        WHEN 'Bill Pay'    THEN 0.0015
+                        WHEN 'Treasury'    THEN 0.0005
+                        WHEN 'Travel'      THEN 0.035
+                        WHEN 'SaaS'        THEN 0.075
+                        WHEN 'SaaS Add-On' THEN 0.075
+                        WHEN 'Procurement' THEN 0.075
+                        ELSE 0
+                    END * 3
+                ELSE 0
+            END,
+            CASE WHEN o.opportunity_type = 'Expansion'
+                 THEN COALESCE(o.total_expansion_est_cp, 0)
+                 ELSE 0 END
+        ) AS est_cp
+    FROM analytics.marts.dim_sfdc_opportunities o
+    LEFT JOIN analytics.marts.dim_sfdc_accounts a ON a.account_id = o.account_id
+    WHERE o.opportunity_owner = '__OWNER__'
+      AND o.opportunity_is_closed = FALSE
+      AND o.opportunity_type IN ('Expansion', 'Renewal')
+),
+accounts_with_opps AS (
+    SELECT
+        account_id,
+        ANY_VALUE(account_name) AS account_name,
+        COUNT(*)                AS open_opp_count,
+        SUM(est_cp)             AS total_est_cp,
+        MIN(close_date)         AS soonest_close_date,
+        LISTAGG(opportunity_type, '|')
+            WITHIN GROUP (ORDER BY est_cp DESC) AS opp_types_pipe,
+        LISTAGG(COALESCE(expansion_product, ''), '|')
+            WITHIN GROUP (ORDER BY est_cp DESC) AS opp_products_pipe,
+        LISTAGG(stage_name, '|')
+            WITHIN GROUP (ORDER BY est_cp DESC) AS opp_stages_pipe,
+        ARRAY_AGG(OBJECT_CONSTRUCT(
+            'opp_id',                opportunity_id,
+            'type',                  opportunity_type,
+            'product',               expansion_product,
+            'stage',                 stage_name,
+            'close_date',            close_date,
+            'monthly_amount',        monthly_expansion_amount,
+            'next_step',             next_step,
+            'expansion_notes',       expansion_notes,
+            'est_cp',                est_cp,
+            'total_expansion_est_cp', total_expansion_est_cp
+        )) WITHIN GROUP (ORDER BY est_cp DESC) AS opps
+    FROM base_opps
+    GROUP BY 1
+),
+-- Account-level last email thread
+last_email_per_account AS (
+    SELECT
+        sfdc_account_id AS account_id,
+        last_email_created_at::DATE AS last_email_date,
+        first_sfdc_email_subject   AS last_email_subject,
+        last_email_direction,
+        thread_owner_full_name     AS last_email_contact
+    FROM analytics.marts.dim_email_threads
+    WHERE sfdc_account_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY sfdc_account_id
+        ORDER BY last_email_created_at DESC
+    ) = 1
+),
+-- Account-level last Gong call (≥ 3 min). Uses sfdc_primary_account_id so we
+-- pick up ANY recent call on the account, not just calls tied to a specific opp.
+last_call_per_account AS (
+    SELECT
+        sgc.sfdc_primary_account_id AS account_id,
+        fgc.call_id,
+        fgc.call_title,
+        fgc.call_started::DATE AS call_date,
+        fgc.call_url,
+        fgc.duration           AS call_duration_sec
+    FROM analytics.marts.dim_sfdc_gong_call sgc
+    JOIN analytics.marts.fct_gong_calls fgc ON fgc.call_id = sgc.gong_call_id
+    WHERE sgc.sfdc_primary_account_id IS NOT NULL
+      AND fgc.duration >= 180
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY sgc.sfdc_primary_account_id
+        ORDER BY fgc.call_started DESC
+    ) = 1
+),
+last_call_summary AS (
+    SELECT
+        lc.account_id,
+        lc.call_id,
+        lc.call_title,
+        lc.call_date,
+        lc.call_url,
+        lc.call_duration_sec,
+        LISTAGG(dgs.section_text, ' ') WITHIN GROUP (ORDER BY dgs.section_index) AS call_section_text
+    FROM last_call_per_account lc
+    LEFT JOIN analytics.marts.dim_gong_section_summary dgs ON dgs.call_id = lc.call_id
+    GROUP BY 1, 2, 3, 4, 5, 6
+)
+SELECT
+    a.account_id,
+    a.account_name,
+    a.open_opp_count,
+    a.total_est_cp,
+    a.soonest_close_date,
+    a.opps,
+    a.opp_types_pipe,
+    a.opp_products_pipe,
+    a.opp_stages_pipe,
+    e.last_email_date,
+    e.last_email_subject,
+    e.last_email_direction,
+    e.last_email_contact,
+    c.call_id        AS last_call_id,
+    c.call_title     AS last_call_title,
+    c.call_date      AS last_call_date,
+    c.call_url       AS last_call_url,
+    c.call_section_text AS last_call_summary,
+    CASE
+        WHEN e.last_email_date IS NULL AND c.call_date IS NULL THEN NULL
+        WHEN e.last_email_date IS NULL THEN c.call_date
+        WHEN c.call_date IS NULL        THEN e.last_email_date
+        ELSE GREATEST(e.last_email_date, c.call_date)
+    END AS last_touch_date,
+    CASE
+        WHEN e.last_email_date IS NULL AND c.call_date IS NULL THEN NULL
+        ELSE DATEDIFF('day',
+            CASE
+                WHEN e.last_email_date IS NULL THEN c.call_date
+                WHEN c.call_date IS NULL        THEN e.last_email_date
+                ELSE GREATEST(e.last_email_date, c.call_date)
+            END,
+            CURRENT_DATE)
+    END AS days_since_touch
+FROM accounts_with_opps a
+LEFT JOIN last_email_per_account e ON e.account_id = a.account_id
+LEFT JOIN last_call_summary      c ON c.account_id = a.account_id
+ORDER BY a.total_est_cp DESC NULLS LAST
+"""
+
+
+# ── ACCOUNT_EMAIL_HISTORY_QUERY ──────────────────────────────────────────────
+# Pulls last N email threads for a given account. Used by the opp context
+# summarizer to ground the AI summary in real email history (subjects,
+# directions, dates). Limited to last 180 days to keep results focused on
+# the current sales motion, not ancient history.
+#
+# Parameters injected by format_query via str.format:
+#   {account_id} — SFDC 18-char ID
+#   {limit} — max threads to return (default 5 via the caller)
+ACCOUNT_EMAIL_HISTORY_QUERY = """
+SELECT
+    last_email_created_at::DATE AS email_date,
+    first_sfdc_email_subject   AS subject,
+    last_email_direction       AS direction,
+    thread_owner_full_name     AS ramp_side_owner,
+    historical_thread_owner_role AS ramp_side_role
+FROM analytics.marts.dim_email_threads
+WHERE sfdc_account_id = '{account_id}'
+  AND last_email_created_at >= DATEADD('day', -180, CURRENT_DATE)
+ORDER BY last_email_created_at DESC
+LIMIT {limit}
+"""
+
+
 STALE_OPPS_QUERY = """
 WITH greg_open_opps AS (
     SELECT
@@ -712,6 +912,13 @@ last_call_detail AS (
             AND ledger.date_day = CURRENT_DATE - 1
             AND ledger.owner_name = 'Gregory Nallie'
         WHERE gt.call_duration_sec >= 180
+          -- Only show calls the user was actually on
+          AND EXISTS (
+              SELECT 1 FROM analytics.marts.dim_gong_transcript_paragraph p
+              WHERE p.call_id = gt.call_id
+                AND p.is_ramp_participant = TRUE
+                AND LOWER(p.speaker_email) = LOWER('gnallie@ramp.com')
+          )
         QUALIFY ROW_NUMBER() OVER (PARTITION BY gt.account_id ORDER BY gt.call_start DESC) = 1
     ) rc
     JOIN analytics.marts.dim_gong_section_summary gs ON gs.call_id = rc.call_id
@@ -2093,6 +2300,23 @@ open_opps AS (
       AND opp.expansion_subtype IN (
           'Card Expansion','Bill Pay Expansion','Travel Expansion','Treasury Expansion')
 ),
+-- Recently closed-won opps: suppress acceleration signals for same product type
+recently_closed_won AS (
+    SELECT DISTINCT opp.account_id,
+        CASE opp.expansion_subtype
+            WHEN 'Card Expansion' THEN 'Card'
+            WHEN 'Bill Pay Expansion' THEN 'Bill Pay'
+            WHEN 'Travel Expansion' THEN 'Travel'
+            WHEN 'Treasury Expansion' THEN 'Treasury'
+        END AS product_type
+    FROM analytics.marts.dim_sfdc_opportunities opp
+    WHERE opp.opportunity_is_won = TRUE
+      AND opp.opportunity_type = 'Expansion'
+      AND opp.opportunity_owner = 'Gregory Nallie'
+      AND opp.expansion_subtype IN (
+          'Card Expansion','Bill Pay Expansion','Travel Expansion','Treasury Expansion')
+      AND opp.opportunity_closed_won_date >= CURRENT_DATE - 90
+),
 baseline_per_opp AS (
     SELECT g.opportunity_id,
         CASE g.expansion_subtype
@@ -2405,6 +2629,7 @@ accel_metrics AS (
     LEFT JOIN splm_60 sp60 ON sp60.account_id = cs.account_id
 ),
 -- Accounts with NO open opp that show acceleration
+-- Also excludes accounts with a recently closed-won opp for the SAME product type
 no_opp_accounts AS (
     SELECT am.*
     FROM accel_metrics am
@@ -2413,6 +2638,11 @@ no_opp_accounts AS (
         WHERE opportunity_is_closed = FALSE AND opportunity_type = 'Expansion'
           AND opportunity_owner = 'Gregory Nallie'
           AND opportunity_stage_name != 'S0: Holding'
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM recently_closed_won rcw
+        WHERE rcw.account_id = am.account_id
+          AND rcw.product_type = am.best_product
     )
 ),
 -- Signal 3a: early_accel — L7D ramping, L30D still low (window open)
@@ -2657,6 +2887,8 @@ leading_indicator AS (
     AND NOT EXISTS (SELECT 1 FROM early_accel ea WHERE ea.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM close_now cn WHERE cn.account_id = sa.account_id)
+    -- Suppress if recently closed-won bill pay opp (within 90 days)
+    AND NOT EXISTS (SELECT 1 FROM recently_closed_won rcw WHERE rcw.account_id = sa.account_id AND rcw.product_type = 'Bill Pay')
 ),
 -- ── Card leading indicator: submitted card payments (pre-clearing) ──
 card_leading AS (
@@ -2693,6 +2925,8 @@ card_leading AS (
     AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM close_now cn WHERE cn.account_id = sa.account_id)
     AND NOT EXISTS (SELECT 1 FROM leading_indicator li WHERE li.account_id = sa.account_id)
+    -- Suppress if recently closed-won card opp (within 90 days)
+    AND NOT EXISTS (SELECT 1 FROM recently_closed_won rcw WHERE rcw.account_id = sa.account_id AND rcw.product_type = 'Card')
 ),
 -- ── First bill created signal: open bill pay opp + first-ever bill in Ramp ──
 first_bill_signal AS (
@@ -2748,6 +2982,8 @@ treasury_spike AS (
       AND NOT EXISTS (SELECT 1 FROM early_accel ea WHERE ea.account_id = sa.account_id AND ea.product = 'Treasury Expansion')
       AND NOT EXISTS (SELECT 1 FROM sustained_accel sac WHERE sac.account_id = sa.account_id AND sac.product = 'Treasury Expansion')
       AND NOT EXISTS (SELECT 1 FROM close_now cn WHERE cn.account_id = sa.account_id)
+      -- Suppress if recently closed-won treasury opp (within 90 days)
+      AND NOT EXISTS (SELECT 1 FROM recently_closed_won rcw WHERE rcw.account_id = sa.account_id AND rcw.product_type = 'Treasury')
 ),
 -- Signal 9: opp_first_spend — open opp where product went from ~$0 to ANY spend
 -- Catches 0-to-1 activations that are too small for other signal thresholds
@@ -2888,6 +3124,146 @@ ORDER BY
         WHEN 'treasury_spike'   THEN 9
     END,
     est_cp DESC
+"""
+
+# ── Renewal/Spiff Window Query ────────────────────────────────────────────────
+# Accounts with a Plus renewal within ±30 days, enriched with spend, open/recent
+# expansion opps, and last touch data. Powers the Renewals tab.
+RENEWAL_WINDOW_QUERY = """
+WITH renewal_accounts AS (
+    SELECT DISTINCT
+        opp.account_id,
+        sa.account_name,
+        sa.business_id,
+        opp.opportunity_id AS renewal_opp_id,
+        opp.opportunity_close_date AS renewal_date,
+        opp.opportunity_stage_name AS renewal_stage,
+        DATEDIFF('day', CURRENT_DATE, opp.opportunity_close_date) AS days_until_renewal
+    FROM analytics.marts.dim_sfdc_opportunities opp
+    JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = opp.account_id
+    JOIN analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
+        ON ledger.account_id = opp.account_id
+        AND ledger.date_day = CURRENT_DATE - 1
+        AND ledger.owner_name = 'Gregory Nallie'
+    WHERE opp.opportunity_type = 'Renewal'
+      AND opp.opportunity_close_date BETWEEN CURRENT_DATE - 30 AND CURRENT_DATE + 30
+),
+spend AS (
+    SELECT ra.account_id,
+        ROUND(COALESCE(SUM(tpv.card_tpv), 0)) AS card_l30d,
+        ROUND(COALESCE(SUM(tpv.billpay_tpv), 0)) AS bill_l30d,
+        ROUND(COALESCE(SUM(tpv.travel_tpv), 0)) AS travel_l30d,
+        ROUND(COALESCE(AVG(tpv.treasury_available_balance), 0)) AS treasury_avg
+    FROM renewal_accounts ra
+    JOIN analytics.metrics.fct_daily_business__multiproduct_tpv tpv
+        ON tpv.business_id = ra.business_id AND tpv.date_day >= CURRENT_DATE - 30
+    GROUP BY 1
+),
+open_expansion AS (
+    SELECT opp.account_id,
+        LISTAGG(DISTINCT opp.expansion_subtype || ' (' || opp.opportunity_stage_name || ')', ', ') AS open_opps
+    FROM analytics.marts.dim_sfdc_opportunities opp
+    WHERE opp.opportunity_is_closed = FALSE
+      AND opp.opportunity_type = 'Expansion'
+      AND opp.opportunity_owner = 'Gregory Nallie'
+      AND opp.account_id IN (SELECT account_id FROM renewal_accounts)
+    GROUP BY 1
+),
+recent_cw AS (
+    SELECT opp.account_id,
+        LISTAGG(DISTINCT opp.expansion_subtype || ' (CW ' || opp.opportunity_closed_won_date::date || ')', ', ') AS recent_cw_opps
+    FROM analytics.marts.dim_sfdc_opportunities opp
+    WHERE opp.opportunity_is_won = TRUE
+      AND opp.opportunity_type = 'Expansion'
+      AND opp.opportunity_owner = 'Gregory Nallie'
+      AND opp.account_id IN (SELECT account_id FROM renewal_accounts)
+      AND opp.opportunity_closed_won_date >= CURRENT_DATE - 60
+    GROUP BY 1
+),
+last_touch AS (
+    SELECT ra.account_id,
+        MAX(em.sfdc_email_created_at::date) AS last_email_date,
+        MAX(gt.call_start::date) AS last_call_date
+    FROM renewal_accounts ra
+    LEFT JOIN analytics.marts.dim_emails em
+        ON em.account_id = ra.account_id AND em.sfdc_email_created_at >= CURRENT_DATE - 90
+    LEFT JOIN analytics.marts.dim_sfdc_gong_transcripts gt
+        ON gt.account_id = ra.account_id AND gt.call_start >= CURRENT_DATE - 90
+    GROUP BY 1
+)
+SELECT
+    ra.account_name, ra.account_id, ra.renewal_opp_id,
+    ra.renewal_date, ra.renewal_stage, ra.days_until_renewal,
+    COALESCE(s.card_l30d, 0) AS card_l30d,
+    COALESCE(s.bill_l30d, 0) AS bill_l30d,
+    COALESCE(s.travel_l30d, 0) AS travel_l30d,
+    COALESCE(s.treasury_avg, 0) AS treasury_avg,
+    oe.open_opps,
+    rcw.recent_cw_opps,
+    lt.last_email_date,
+    lt.last_call_date
+FROM renewal_accounts ra
+LEFT JOIN spend s ON s.account_id = ra.account_id
+LEFT JOIN open_expansion oe ON oe.account_id = ra.account_id
+LEFT JOIN recent_cw rcw ON rcw.account_id = ra.account_id
+LEFT JOIN last_touch lt ON lt.account_id = ra.account_id
+ORDER BY ra.renewal_date ASC
+"""
+
+# ── Active Trials Query ───────────────────────────────────────────────────────
+# Accounts with active or recently expired Plus/Procurement trials. Powers the Trials tab.
+ACTIVE_TRIALS_QUERY = """
+WITH plus_trials AS (
+    SELECT
+        sa.account_id, sa.account_name, sa.business_id,
+        'Plus' AS trial_type,
+        sub.subscription_trial_start_date AS trial_start,
+        sub.subscription_trial_end_date AS trial_end,
+        DATEDIFF('day', CURRENT_DATE, sub.subscription_trial_end_date) AS days_remaining
+    FROM analytics.marts.dim_book_of_business_accounts_view bob
+    JOIN analytics.marts.dim_sfdc_accounts sa ON sa.account_id = bob.sfdc_account_id
+    JOIN analytics.marts.dim_subscriptions sub ON sub.business_id = sa.business_id
+    JOIN analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
+        ON ledger.account_id = sa.account_id AND ledger.date_day = CURRENT_DATE - 1
+        AND ledger.owner_name = 'Gregory Nallie'
+    WHERE bob.plus_product_status_v2 = 'in trial'
+),
+procurement_trials AS (
+    SELECT
+        sa.account_id, sa.account_name, sa.business_id,
+        'Procurement' AS trial_type,
+        puf.last_self_serve_procurement_trial_created_at::date AS trial_start,
+        DATEADD('day', 60, puf.last_self_serve_procurement_trial_created_at::date) AS trial_end,
+        DATEDIFF('day', CURRENT_DATE,
+            DATEADD('day', 60, puf.last_self_serve_procurement_trial_created_at::date)) AS days_remaining
+    FROM analytics.marts.dim_procurement_app_upsell_funnel puf
+    JOIN analytics.marts.dim_sfdc_accounts sa ON sa.business_id = puf.business_id
+    JOIN analytics.agg.agg_sfdc__daily_account_owner_ledger ledger
+        ON ledger.account_id = sa.account_id AND ledger.date_day = CURRENT_DATE - 1
+        AND ledger.owner_name = 'Gregory Nallie'
+    WHERE puf.is_procurement_trial_active = TRUE
+),
+trial_accounts AS (
+    SELECT * FROM plus_trials
+    UNION ALL
+    SELECT * FROM procurement_trials
+),
+last_touch AS (
+    SELECT ta.account_id,
+        MAX(gt.call_start::date) AS last_call_date
+    FROM trial_accounts ta
+    LEFT JOIN analytics.marts.dim_sfdc_gong_transcripts gt
+        ON gt.account_id = ta.account_id AND gt.call_start >= CURRENT_DATE - 90
+    GROUP BY 1
+)
+SELECT
+    ta.account_name, ta.account_id, ta.business_id,
+    ta.trial_type, ta.trial_start, ta.trial_end, ta.days_remaining,
+    NULL AS last_email_date,
+    lt.last_call_date
+FROM trial_accounts ta
+LEFT JOIN last_touch lt ON lt.account_id = ta.account_id
+ORDER BY ta.days_remaining ASC
 """
 
 # ── Auto-parameterize owner name in all queries ──────────────────────────────

@@ -197,7 +197,7 @@ def get_recent_meetings(minutes: int = 10, skip_end_check: bool = False) -> list
         # PLUS we verify the transcript has stopped growing (updated_at unchanged
         # for 2+ min). This prevents processing mid-call on brief audio drops.
         if not skip_end_check:
-            _TRANSCRIPT_COOLDOWN = 2 * 60   # 2 min of no transcript updates = truly ended
+            _TRANSCRIPT_COOLDOWN = 4 * 60   # 4 min of no transcript updates = truly ended (was 2, bumped to reduce premature fires on mid-call pauses)
             _CAL_OVERRUN_BUFFER = 10 * 60   # 10 min after cal end if no Granola signal
             _STALE_BUFFER = 15 * 60         # 15 min since last update = assume ended
 
@@ -284,7 +284,7 @@ def get_recent_meetings(minutes: int = 10, skip_end_check: bool = False) -> list
 
                 # Skip meetings still in progress (same logic as local cache)
                 if not skip_end_check:
-                    _TRANSCRIPT_COOLDOWN = 2 * 60
+                    _TRANSCRIPT_COOLDOWN = 4 * 60   # bumped from 2 → 4 min
                     _CAL_OVERRUN_BUFFER = 10 * 60
                     _STALE_BUFFER = 15 * 60
 

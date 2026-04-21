@@ -6,7 +6,7 @@ Ideas, planned features, and known blockers. Prioritized by impact.
 
 ## Blocked (Waiting on External)
 
-- [ ] **Salesforce opp writes via Growth MCP** — `create_opportunity()` and `update_opportunity()` are blocked because Gumstack MCP returns "Tool restricted for your permission group." Waiting for Growth MCP write capabilities (expected April 2026). Affects `/opp` command and all interactive opp creation buttons. (`core/salesforce_client.py:7-8, 59, 83`)
+- [x] ~~**Salesforce opp writes via Growth MCP**~~ — Done 2026-04-16. `create_opportunity()` and `update_opportunity()` now route through `core/growth_mcp.py` → `create_expansion_opportunity` and `update_opportunities` tools at `growth-mcp-remote.ramp.builders/mcp`. Gap fields (`Gong_Outreach_Link__c`, `WinReasonDetail__c`) set via follow-up update with 2s/4s/6s exponential-backoff retry for SF async trigger races. `/opp` command and post-meeting opp creation are live.
 - [ ] **Toki sequence enrollment** — Growth MCP's `add_outreach_prospects_to_sequence` doesn't exist yet. Can read sequences and prospects but can't enroll new prospects programmatically.
 - [ ] **Google Calendar in Glass** — Needs IAM on `ramp-gumstack` GCP project to work natively. Currently using workarounds.
 - [ ] **Ramplify deployment** — 4 SSO blockers identified preventing hosted deployment. Bot runs locally via launchd for now.

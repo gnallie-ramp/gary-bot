@@ -56,6 +56,15 @@ _LABEL_NAMES = [
 DEFAULT_LABEL_NAME = "Claude Drafts/Prospecting"
 
 
+def _get_default_user_id() -> str:
+    """Get the default user ID for auth alerts."""
+    try:
+        from config import GREG_SLACK_ID
+        return GREG_SLACK_ID
+    except Exception:
+        return ""
+
+
 def _alert_gmail_auth_failure(user_id: Optional[str], error: str = "") -> None:
     """Send an inline DM when Gmail auth fails (rate-limited)."""
     try:
@@ -104,11 +113,127 @@ def _load_glass_token() -> Optional[str]:
                 if expires_at > time.time() * 1000:
                     return entry["accessToken"]
                 else:
-                    logger.debug("Glass Gmail token expired (expiresAt=%s)", expires_at)
+                    # Token expired — try refreshing with Glass's refresh token
+                    refresh_tok = entry.get("refreshToken")
+                    if refresh_tok:
+                        refreshed = _refresh_glass_token(entry, key, creds)
+                        if refreshed:
+                            return refreshed
+                    logger.debug("Glass Gmail token expired and refresh failed")
                     return None
         return None
     except Exception as e:
         logger.debug("Could not load Glass Gmail token: %s", e)
+        return None
+
+
+def _refresh_glass_token(entry: dict, key: str, creds: dict) -> Optional[str]:
+    """Refresh an expired Glass Gmail token using its refresh_token.
+
+    On success, updates both the Glass credentials file and the bot's
+    per-user token file so both stay in sync.
+    """
+    try:
+        refresh_tok = entry.get("refreshToken")
+        client_id = entry.get("clientId", "")
+        if not refresh_tok:
+            return None
+
+        # If no client_id in Glass entry, try to get it from the mcp-remote client_info
+        if not client_id:
+            if _CLIENT_FILE.exists():
+                with open(_CLIENT_FILE) as f:
+                    client_id = json.load(f).get("client_id", "")
+
+        resp = requests.post(
+            _OAUTH_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_tok,
+                "client_id": client_id,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("Glass Gmail token refresh failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+            return None
+
+        new_tokens = resp.json()
+        new_access = new_tokens.get("access_token")
+        if not new_access:
+            return None
+
+        # Update Glass credentials file
+        expires_in = new_tokens.get("expires_in", 3600)
+        entry["accessToken"] = new_access
+        entry["expiresAt"] = int((time.time() + expires_in) * 1000)
+        if "refresh_token" in new_tokens:
+            entry["refreshToken"] = new_tokens["refresh_token"]
+        creds["mcpOAuth"][key] = entry
+        with open(_GLASS_CREDS, "w") as f:
+            json.dump(creds, f, indent=2)
+
+        # Also sync to bot's per-user and default token files
+        _sync_tokens_to_bot(new_tokens, refresh_tok)
+
+        logger.info("Glass Gmail token refreshed successfully")
+        return new_access
+
+    except Exception as e:
+        logger.warning("Glass Gmail token refresh error: %s", e)
+        return None
+
+
+def _sync_tokens_to_bot(new_tokens: dict, fallback_refresh: str) -> None:
+    """Sync fresh tokens to the bot's token files (default + per-user)."""
+    token_data = {
+        "access_token": new_tokens["access_token"],
+        "token_type": "Bearer",
+        "expires_in": new_tokens.get("expires_in", 3600),
+        "scope": new_tokens.get("scope", "gumstack"),
+        "refresh_token": new_tokens.get("refresh_token", fallback_refresh),
+    }
+
+    # Update default mcp-remote token
+    try:
+        if _TOKEN_FILE.parent.exists():
+            with open(_TOKEN_FILE, "w") as f:
+                json.dump(token_data, f, indent=2)
+            logger.debug("Synced fresh tokens to default mcp-remote file")
+    except Exception as e:
+        logger.debug("Failed to sync to mcp-remote: %s", e)
+
+    # Update per-user tokens
+    try:
+        token_dir = Path.home() / ".gary_bot_tokens"
+        if token_dir.exists():
+            for user_dir in token_dir.iterdir():
+                gmail_file = user_dir / "gmail_tokens.json"
+                if gmail_file.exists():
+                    with open(gmail_file, "w") as f:
+                        json.dump(token_data, f, indent=2)
+                    logger.debug("Synced fresh tokens to %s", gmail_file)
+    except Exception as e:
+        logger.debug("Failed to sync to per-user tokens: %s", e)
+
+
+def _try_glass_refresh_fallback() -> Optional[str]:
+    """Last resort: try to refresh using Glass's refresh token when bot's own token is revoked."""
+    try:
+        if not _GLASS_CREDS.exists():
+            return None
+        with open(_GLASS_CREDS) as f:
+            creds = json.load(f)
+        for key, entry in creds.get("mcpOAuth", {}).items():
+            if key.startswith(_GLASS_GMAIL_KEY) and entry.get("refreshToken"):
+                result = _refresh_glass_token(entry, key, creds)
+                if result:
+                    logger.info("Glass refresh fallback succeeded — bot tokens synced")
+                    return result
+        return None
+    except Exception as e:
+        logger.debug("Glass refresh fallback failed: %s", e)
         return None
 
 
@@ -173,6 +298,17 @@ def _refresh_token(user_id: Optional[str] = None) -> str:
     )
     if resp.status_code != 200:
         logger.warning("Gmail token refresh failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+        # Last resort: try Glass's refresh token if bot's is revoked
+        glass_refreshed = _try_glass_refresh_fallback()
+        if glass_refreshed:
+            return glass_refreshed
+        # Trigger automatic re-auth flow (opens browser for user)
+        try:
+            from utils.auth_health import trigger_gmail_reauth
+            trigger_gmail_reauth(user_id or _get_default_user_id())
+        except Exception:
+            pass
+        _alert_gmail_auth_failure(user_id, f"Refresh token expired — re-auth needed")
         return tokens["access_token"]
 
     new_tokens = resp.json()

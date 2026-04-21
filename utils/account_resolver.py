@@ -286,12 +286,68 @@ def fetch_contact_emails(conn, account_ids: list[str]) -> dict:
                     table,
                     len(result),
                 )
+                # Enrich contacts with Ramp user_role from BoB contacts table
+                result = _enrich_with_user_role(result, ids_str)
                 return result
         except Exception as exc:
             logger.debug("Contact fetch from %s failed: %s", table, exc)
             continue
 
     return {}
+
+
+def _enrich_with_user_role(contacts: dict, ids_str: str) -> dict:
+    """Enrich contact dicts with Ramp user_role from the BoB contacts table.
+
+    Matches by email to add the user_role field (BUSINESS_OWNER, BUSINESS_ADMIN, etc.)
+    to each contact dict. Contacts without a match get user_role = "".
+    """
+    try:
+        role_query = f"""
+        SELECT sfdc_account_id AS account_id,
+               LOWER(email) AS email,
+               user_role
+        FROM analytics.marts.dim_book_of_business_account_contact__email_x_sfdc_account_id
+        WHERE sfdc_account_id IN ({ids_str})
+          AND email IS NOT NULL AND email != ''
+          AND user_role IS NOT NULL AND user_role != ''
+        """
+        role_df = run_query(role_query)
+        if role_df.empty:
+            # No role data — just add empty user_role to all contacts
+            for acct_contacts in contacts.values():
+                for c in acct_contacts:
+                    c.setdefault("user_role", "")
+            return contacts
+
+        # Build lookup: (account_id, email_lower) -> user_role
+        # If a contact has multiple roles, prefer BUSINESS_OWNER > BUSINESS_ADMIN > others
+        _ROLE_PRIORITY = {
+            "BUSINESS_OWNER": 0, "BUSINESS_ADMIN": 1, "IT_ADMIN": 2,
+            "BUSINESS_BOOKKEEPER": 3, "BUSINESS_USER": 4,
+        }
+        role_map = {}  # (account_id, email) -> user_role
+        for _, row in role_df.iterrows():
+            key = (row["account_id"], row["email"])
+            existing = role_map.get(key)
+            new_role = row["user_role"]
+            if existing is None or _ROLE_PRIORITY.get(new_role, 99) < _ROLE_PRIORITY.get(existing, 99):
+                role_map[key] = new_role
+
+        # Enrich contacts
+        for acct_id, acct_contacts in contacts.items():
+            for c in acct_contacts:
+                email_lower = (c.get("email") or "").strip().lower()
+                c["user_role"] = role_map.get((acct_id, email_lower), "")
+
+    except Exception as exc:
+        logger.debug("User role enrichment failed: %s", exc)
+        # Graceful fallback — add empty user_role
+        for acct_contacts in contacts.values():
+            for c in acct_contacts:
+                c.setdefault("user_role", "")
+
+    return contacts
 
 
 # ── Hash detection ────────────────────────────────────────────────────────
