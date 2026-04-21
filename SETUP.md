@@ -89,6 +89,8 @@ Send screenshots of your terminal to Glass (including the claude mcp add command
 
 Once all manual prerequisites are done, copy and paste this entire block into Project Glass. **Do not modify anything before pasting** — Glass will ask you for your info at the right time.
 
+> **Sharing with teammates?** Point them at **[GLASS_SETUP_PROMPT.md](GLASS_SETUP_PROMPT.md)** — same prompt, standalone, with the prereqs summarized at the top.
+
 > **Tip:** Change the dropdown below Glass chat to "Auto Accept" for fewer confirmation prompts.
 
 ~~~
