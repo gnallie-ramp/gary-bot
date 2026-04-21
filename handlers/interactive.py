@@ -1430,6 +1430,81 @@ def register_interactive_handlers(app):
             threading.Thread(target=_draft, daemon=True).start()
             return
 
+    # ── Team Intel tab ───────────────────────────────────────────────
+
+    @app.action({"action_id": re.compile(r"^team_intel_window_")})
+    def handle_team_intel_window(ack, body, client):
+        """Change the Team Intel lookback window (30 / 90 / 180 / 365)."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        try:
+            days = int(action.get("value", "180"))
+        except ValueError:
+            days = 180
+
+        from handlers.home_tab import _team_cp_window, _team_intel_expanded
+        _team_cp_window[user_id] = days
+        # Reset expand state when the window changes — opp IDs may not match
+        _team_intel_expanded[user_id] = set()
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after team_intel window change failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action("team_intel_refresh")
+    def handle_team_intel_refresh(ack, body, client):
+        """Force-refresh the Team Intel cache (bypasses 1h TTL)."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        from handlers.home_tab import _team_cp_window, _team_cp_fetch
+        days = _team_cp_window.get(user_id, 180)
+
+        def _refresh():
+            try:
+                _team_cp_fetch(user_id, days, force=True)
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("team_intel refresh failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action({"action_id": re.compile(r"^team_intel_deal_")})
+    def handle_team_intel_deal_toggle(ack, body, client):
+        """Expand/collapse a deal card in Team Intel tab."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        opp_id = action.get("value") or ""
+        if not opp_id:
+            return
+
+        from handlers.home_tab import _team_intel_expanded
+        expanded = _team_intel_expanded.setdefault(user_id, set())
+        if opp_id in expanded:
+            expanded.remove(opp_id)
+        else:
+            expanded.add(opp_id)
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after team_intel deal toggle failed: %s", e)
+
+        threading.Thread(target=_refresh, daemon=True).start()
+
     # ── App mention ──────────────────────────────────────────────────
 
     @app.event("app_mention")

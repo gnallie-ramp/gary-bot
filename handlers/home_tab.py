@@ -24,6 +24,7 @@ _TABS = [
     ("prospecting", ":mag: Prospecting"),
     ("meetings", ":calendar: Meetings"),
     ("post_close", ":chart_with_upwards_trend: Post-Close"),
+    ("team_intel", ":trophy: Team Intel"),
     ("renewals", ":repeat: Renewals"),
     ("drafts", ":email: Drafts"),
     ("settings", ":gear: Settings"),
@@ -182,6 +183,7 @@ def _build_home_blocks(client, user_id):
         "prospecting": _build_prospecting_tab,
         "meetings": _build_meetings_tab,
         "post_close": _build_post_close_tab,
+        "team_intel": _build_team_intel_tab,
         "renewals": _build_renewals_tab,
         "trials": _build_trials_tab,
         "drafts": _build_drafts_tab,
@@ -1696,6 +1698,221 @@ def _build_meetings_tab(client, user_id):
 # Per-user cache for post-close data (10-min TTL)
 _post_close_cache = {}  # user_id -> {"data": [...], "fetched_at": float}
 _POST_CLOSE_CACHE_TTL = 600
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Team Intel
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Per-user cache of team CP data (expensive 180d query, 1h TTL)
+_team_cp_cache = {}   # {(user_id, lookback_days): {"leaderboard": df, "my_deals": df, "fetched_at": epoch}}
+# Per-user selected lookback window
+_team_cp_window = {}  # user_id -> lookback_days (default 180)
+# Per-user expanded deal set
+_team_intel_expanded = {}  # user_id -> set(opportunity_id)
+
+_TEAM_CP_TTL_SEC = 3600
+
+
+def _team_cp_fetch(user_id: str, lookback_days: int, force: bool = False):
+    """Return (leaderboard_df, my_deals_df) from cache or a fresh query."""
+    from core.snowflake_client import run_query
+    from queries.team_cp import TEAM_CP_LEADERBOARD_QUERY, TOP_DEALS_QUERY
+    from core.user_registry import get_user_sf_name
+
+    key = (user_id or "default", lookback_days)
+    now = time.time()
+    if not force:
+        c = _team_cp_cache.get(key)
+        if c and (now - c.get("fetched_at", 0) < _TEAM_CP_TTL_SEC):
+            return c["leaderboard"], c["my_deals"]
+
+    try:
+        lb = run_query(TEAM_CP_LEADERBOARD_QUERY.format(lookback_days=lookback_days))
+    except Exception as e:
+        logger.error("team_cp leaderboard query failed: %s", e)
+        lb = None
+
+    my_name = get_user_sf_name(user_id) or ""
+    try:
+        md = run_query(TOP_DEALS_QUERY.format(
+            lookback_days=lookback_days,
+            owner_name=my_name.replace("'", "''"),
+            top_n=20,
+        )) if my_name else None
+    except Exception as e:
+        logger.error("team_cp my_deals query failed: %s", e)
+        md = None
+
+    _team_cp_cache[key] = {"leaderboard": lb, "my_deals": md, "fetched_at": now}
+    return lb, md
+
+
+def _build_team_intel_tab(client, user_id):
+    """Team Intel — realized CP leaderboard + personal top deals.
+
+    Data source: derived from dim_sfdc_opportunities + agg_sfdc_expansion_opportunity_spend,
+    filtered to `normalized_opportunity_owner_role_stamped = 'Sales - AM - Growth'`.
+    Matches Looker 'Growth AM IC Detailed Metrics' scope. Quota targets live
+    in gated tables — showing raw $ CP until READER access granted.
+    """
+    from core.user_registry import get_user_sf_name
+
+    blocks = []
+    me_name = get_user_sf_name(user_id) or ""
+    lookback_days = _team_cp_window.get(user_id, 180)
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:trophy: Team Intel — Realized CP Leaderboard + Top Deals*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "_Realized CP = max(0, post-close 30d spend − pre-close 30d spend) × NTR. "
+            "Filtered to the Growth AM team. Same scope as the Looker "
+            "'Growth AM IC Detailed Metrics' dashboard (quota targets pending READER access)._"
+        )}],
+    })
+
+    # ── Window selector ────────────────────────────────────────────────────
+    window_btns = []
+    for d, label in [(30, "30d"), (90, "90d"), (180, "180d"), (365, "365d")]:
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": label, "emoji": True},
+            "action_id": f"team_intel_window_{d}",
+            "value": str(d),
+        }
+        if d == lookback_days:
+            btn["style"] = "primary"
+        window_btns.append(btn)
+    window_btns.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Refresh"},
+        "action_id": "team_intel_refresh",
+        "value": "refresh",
+    })
+    blocks.append({"type": "actions", "elements": window_btns})
+
+    # ── Fetch data ──────────────────────────────────────────────────────────
+    try:
+        leaderboard, my_deals = _team_cp_fetch(user_id, lookback_days)
+    except Exception as e:
+        logger.error("team_intel fetch failed: %s", e)
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": ":warning: Couldn't load team CP data. Check logs."}})
+        return blocks
+
+    if leaderboard is None or leaderboard.empty:
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": "_No CW opps in the selected window. Try widening to 180d+._"}})
+        return blocks
+
+    # ── Leaderboard ────────────────────────────────────────────────────────
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section",
+        "text": {"type": "mrkdwn", "text": f"*:bar_chart: Team Leaderboard — last {lookback_days} days*"}})
+
+    # Find my rank
+    my_rank = None
+    for i, row in leaderboard.reset_index(drop=True).iterrows():
+        if row.get("owner") == me_name:
+            my_rank = i + 1
+            break
+    total_team_cp = int(leaderboard["total_realized_cp"].sum() or 0)
+    if my_rank:
+        my_cp = int(leaderboard.iloc[my_rank - 1].get("total_realized_cp") or 0)
+        pct_of_team = (my_cp / total_team_cp * 100) if total_team_cp else 0
+        blocks.append({"type": "context",
+            "elements": [{"type": "mrkdwn", "text": (
+                f"*You're ranked #{my_rank}* of {len(leaderboard)} · "
+                f"*${my_cp:,} realized CP* _(= {pct_of_team:.1f}% of the team's ${total_team_cp:,})_"
+            )}]})
+
+    # Render every rep as a section block — highlight the caller
+    for i, row in leaderboard.reset_index(drop=True).iterrows():
+        rank = i + 1
+        owner = row.get("owner") or "?"
+        total = int(row.get("total_realized_cp") or 0)
+        card = int(row.get("card_cp") or 0)
+        bp = int(row.get("bp_cp") or 0)
+        deals = int(row.get("deals") or 0)
+        is_me = owner == me_name
+        prefix = ":star:" if is_me else "  "
+        name_fmt = f"*{owner}*" if is_me else owner
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": (
+                f"{prefix} `#{rank:>2}` {name_fmt} — *${total:,}* CP  "
+                f"`Card ${card:,}` · `BP ${bp:,}` · {deals} deals"
+            )}})
+
+    # ── Your top deals ──────────────────────────────────────────────────────
+    blocks.append({"type": "divider"})
+    if my_deals is None or my_deals.empty:
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": "_No CW deals in this window for you — try widening the lookback or check SFDC ownership._"}})
+        return blocks
+
+    blocks.append({"type": "section",
+        "text": {"type": "mrkdwn", "text": f"*:medal: Your top deals — last {lookback_days} days*"}})
+    blocks.append({"type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "_Sorted by realized CP. Click Expand to see incremental spend detail. "
+            "Deal Anatomy (call transcripts + email thread analysis) is Phase 2._"
+        )}]})
+
+    expanded = _team_intel_expanded.get(user_id, set())
+    for _, row in my_deals.iterrows():
+        opp_id = str(row.get("opportunity_id") or "")
+        opp_name = (row.get("opportunity_name") or "")[:80]
+        product = row.get("product") or ""
+        cw_date = row.get("cw_date")
+        cp = int(row.get("realized_cp") or 0)
+        inc_card = int(row.get("inc_card_spend") or 0)
+        inc_bp = int(row.get("inc_bp_spend") or 0)
+        acct_id = row.get("account_id") or ""
+        is_open = opp_id in expanded
+        caret = ":arrow_down:" if is_open else ":arrow_right:"
+
+        sf_link = f"{SF_BASE_URL}/r/Opportunity/{opp_id}/view" if opp_id else ""
+        headline = f"{caret} *${cp:,} CP* · {product} · "
+        if sf_link:
+            headline += f"<{sf_link}|{opp_name}>"
+        else:
+            headline += opp_name
+
+        block = {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{headline}\n_CW {cw_date}_"},
+            "accessory": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Collapse" if is_open else "Expand"},
+                "action_id": f"team_intel_deal_{opp_id}"[:150],
+                "value": opp_id,
+            },
+        }
+        blocks.append(block)
+
+        if is_open:
+            detail_lines = []
+            if inc_card > 0:
+                detail_lines.append(f"• Incremental card spend vs. baseline: *${inc_card:,}* (30d max within 90d post-CW)")
+            if inc_bp > 0:
+                detail_lines.append(f"• Incremental BP spend vs. baseline: *${inc_bp:,}*")
+            if acct_id:
+                detail_lines.append(f"• <{SF_BASE_URL}/r/Account/{acct_id}/view|Open account in Salesforce>")
+            detail_lines.append("_:sparkles: Deal Anatomy (winning messaging patterns, pain points, call excerpts) coming in Phase 2._")
+            blocks.append({"type": "context",
+                "elements": [{"type": "mrkdwn", "text": "\n".join(detail_lines)}]})
+
+    # Cache freshness footer
+    key = (user_id or "default", lookback_days)
+    fetched = _team_cp_cache.get(key, {}).get("fetched_at", 0)
+    blocks.append(_updated_at_block(fetched))
+
+    return blocks
 
 
 def _build_post_close_tab(client, user_id):
