@@ -351,6 +351,17 @@ def _start_scheduler():
         name="Play Library Rebuild",
     )
 
+    # Hot List rebuild: Nightly 3:30 AM PT (after Play Library). Ranks every
+    # user's BoB accounts by (play match × team success rate) and caches
+    # the top 100 per user so the Hot List tab opens instantly.
+    from jobs.hot_list import rebuild as run_hot_list_rebuild
+    scheduler.add_job(
+        _wrap(run_hot_list_rebuild),
+        CronTrigger(hour=3, minute=30),
+        id="hot_list_rebuild",
+        name="Hot List Rebuild",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(

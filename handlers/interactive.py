@@ -1430,6 +1430,131 @@ def register_interactive_handlers(app):
             threading.Thread(target=_draft, daemon=True).start()
             return
 
+    # ── Hot List tab ─────────────────────────────────────────────────
+
+    @app.action({"action_id": re.compile(r"^hot_list_size_")})
+    def handle_hot_list_size(ack, body, client):
+        """Change Top N (20 / 50 / 100)."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        try:
+            n = int(action.get("value", "25"))
+        except ValueError:
+            n = 25
+        from handlers.home_tab import _hot_list_top_n
+        _hot_list_top_n[user_id] = n
+
+        def _refresh():
+            try:
+                from handlers.home_tab import _build_home_blocks
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Home refresh after hot_list size change failed: %s", e)
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action("hot_list_rebuild")
+    def handle_hot_list_rebuild(ack, body, client):
+        """Force-rebuild the Hot List for this user (bypasses cache)."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+
+        def _refresh():
+            try:
+                from jobs.hot_list import build_hot_list_for_user
+                from handlers.home_tab import _build_home_blocks, _hot_list_top_n
+                n = _hot_list_top_n.get(user_id, 25)
+                # Force-recompute and persist
+                fresh = build_hot_list_for_user(user_id or "", top_n=n)
+                # Save to the cache file so next tab open is instant
+                from jobs.hot_list import CACHE_FILE
+                import json as _json
+                payload = {}
+                if CACHE_FILE.exists():
+                    payload = _json.loads(CACHE_FILE.read_text())
+                payload.setdefault("by_user", {})[user_id or "_default"] = fresh
+                CACHE_FILE.write_text(_json.dumps(payload, indent=2, default=str))
+
+                blocks = _build_home_blocks(client, user_id)
+                client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+            except Exception as e:
+                logger.error("Hot List rebuild failed: %s", e)
+        threading.Thread(target=_refresh, daemon=True).start()
+
+    @app.action({"action_id": re.compile(r"^hot_list_overflow_")})
+    def handle_hot_list_overflow(ack, body, client):
+        """Draft / snooze / view SFDC on a Hot List card. Draft routes through
+        the existing plays overflow handler, using the top-matching play_id."""
+        ack()
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
+        action = body.get("actions", [{}])[0]
+        selected = action.get("selected_option", {}).get("value", "{}")
+        try:
+            payload = json.loads(selected)
+        except json.JSONDecodeError:
+            payload = {}
+
+        op = payload.get("op", "")
+        play_id = payload.get("play_id", "")
+        account_id = payload.get("account_id", "")
+        account_name = payload.get("account", "Unknown")
+
+        if not account_id:
+            client.chat_postMessage(channel=user_id, text="Could not identify the account.")
+            return
+
+        if op == "view":
+            from core.slack_formatter import sf_account_url
+            url = sf_account_url(account_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":bust_in_silhouette: *{account_name}* — <{url}|Open in Salesforce>",
+            )
+            return
+
+        if op == "snooze":
+            from utils.snooze import snooze_play_account
+            snooze_play_account(play_id, account_id, days=30, user_id=user_id)
+            client.chat_postMessage(
+                channel=user_id,
+                text=f":zzz: Snoozed *{account_name}* from play {play_id} for 30 days (still visible under any other play it matches).",
+            )
+            return
+
+        if op == "draft":
+            client.chat_postMessage(
+                channel=user_id,
+                text=f"Drafting re-engage email for *{account_name}* (play {play_id})…",
+            )
+            def _draft():
+                with _draft_semaphore:
+                    try:
+                        from jobs.plays_refresh import get_cached_play
+                        play_row = {}
+                        cached = get_cached_play(play_id, user_id=user_id)
+                        if cached:
+                            for r in cached.get("rows", []):
+                                if r.get("account_id") == account_id:
+                                    play_row = r
+                                    break
+                        from jobs.pipeline_drafter import draft_account_reengagement
+                        draft_account_reengagement({
+                            "account_id": account_id,
+                            "account_name": account_name,
+                            "play_id": play_id,
+                            "play_row": play_row,
+                            "category": "hot_list",
+                        }, client, user_id=user_id)
+                    except Exception as e:
+                        logger.error("Hot List draft failed for %s: %s", account_name, e)
+                        client.chat_postMessage(
+                            channel=user_id,
+                            text=f"Failed to draft email for *{account_name}*: {e}",
+                        )
+            threading.Thread(target=_draft, daemon=True).start()
+            return
+
     # ── Team Intel tab ───────────────────────────────────────────────
 
     @app.action({"action_id": re.compile(r"^team_intel_window_")})

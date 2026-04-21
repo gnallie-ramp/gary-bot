@@ -20,6 +20,7 @@ _PRIORITY_CACHE_TTL = 600  # 10 minutes
 _active_tab = {}  # user_id -> tab name
 _TABS = [
     ("signals", ":rotating_light: Signals"),
+    ("hot_list", ":fire: Hot List"),
     ("pipeline", ":clipboard: Pipeline"),
     ("prospecting", ":mag: Prospecting"),
     ("meetings", ":calendar: Meetings"),
@@ -178,6 +179,7 @@ def _build_home_blocks(client, user_id):
     # Tab content
     tab_builders = {
         "signals": _build_signals_tab,
+        "hot_list": _build_hot_list_tab,
         "pipeline": _build_pipeline_tab,
         "stale": _build_stale_tab,  # kept for direct callers; tab bar no longer surfaces it
         "prospecting": _build_prospecting_tab,
@@ -1792,6 +1794,138 @@ def _team_cp_fetch(user_id: str, lookback_days: int, force: bool = False):
 
     _team_cp_cache[key] = {"leaderboard": lb, "my_deals": md, "fetched_at": now}
     return lb, md
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB: Hot List
+# ══════════════════════════════════════════════════════════════════════════════
+
+_hot_list_top_n = {}  # user_id -> selected top N (default 25)
+
+
+def _build_hot_list_tab(client, user_id):
+    """Hot List — top 20-50 accounts across all Plays ranked by
+    (play-match × team-success-rate). Persistent surface of the highest-
+    leverage prospects so there's no excuse not to work them."""
+    from jobs.hot_list import get_or_build_for_user
+
+    blocks = []
+    top_n = _hot_list_top_n.get(user_id, 25)
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*:fire: Hot List — your highest-leverage accounts right now*"},
+    })
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": (
+            "_Ranked by `match_score = Σ(avg team CP × log(deal count))` across every Play "
+            "an account matches. Plays with proven team CP outcomes weight higher. "
+            "Refresh cadence: nightly 3:30 AM PT (or on-demand when the tab opens)._"
+        )}],
+    })
+
+    # Size selector
+    size_btns = []
+    for n in [20, 50, 100]:
+        btn = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": f"Top {n}"},
+            "action_id": f"hot_list_size_{n}",
+            "value": str(n),
+        }
+        if n == top_n:
+            btn["style"] = "primary"
+        size_btns.append(btn)
+    size_btns.append({
+        "type": "button",
+        "text": {"type": "plain_text", "text": ":arrows_counterclockwise: Rebuild"},
+        "action_id": "hot_list_rebuild",
+        "value": "rebuild",
+    })
+    blocks.append({"type": "actions", "elements": size_btns})
+
+    # ── Fetch ───────────────────────────────────────────────────────────────
+    try:
+        hot = get_or_build_for_user(user_id or "", top_n=top_n)
+    except Exception as e:
+        logger.error("Hot List fetch failed: %s", e)
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": f":warning: Couldn't build Hot List: {e}"}})
+        return blocks
+
+    if not hot:
+        blocks.append({"type": "section",
+            "text": {"type": "mrkdwn", "text": (
+                "_No plays have matched accounts yet. "
+                "Try expanding Plays on the Prospecting tab first to warm the cache._"
+            )}})
+        return blocks
+
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section",
+        "text": {"type": "mrkdwn", "text": f"*Showing top {len(hot)} accounts*  _Sorted by match_score._"}})
+
+    for i, entry in enumerate(hot, 1):
+        acct_id = entry.get("account_id") or ""
+        acct_name = entry.get("account_name") or "Unknown"
+        sf_link = f"{SF_BASE_URL}/r/Account/{acct_id}/view" if acct_id else ""
+        acct_str = f"<{sf_link}|{acct_name}>" if sf_link else acct_name
+
+        matching = entry.get("matching_plays") or []
+        plays_str = " · ".join(f"{p.get('icon', ':small_blue_diamond:')} `{p.get('play_id')}`" for p in matching[:4])
+        match_score = int(entry.get("match_score") or 0)
+        est_cp = int(entry.get("est_cp_total") or 0)
+
+        headline = f"*#{i:<2}* *{acct_str}*"
+        subline = f"_matches_: {plays_str}   ·   *match score* `{match_score:,}`"
+        if est_cp > 0:
+            subline += f"   ·   _est. signal CP_ ${est_cp:,}/mo"
+
+        # Single-button accessory: Draft kicks off a re-engage email for the
+        # first matching play. Other plays' matches are still shown in-line
+        # so you know WHY this account's ranked where it is.
+        first_play = matching[0] if matching else {}
+        first_pid = first_play.get("play_id", "")
+        payload = {
+            "account": acct_name,
+            "account_id": acct_id,
+            "play_id": first_pid,
+            "op": "draft",
+        }
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{headline}\n{subline}"},
+            "accessory": {
+                "type": "overflow",
+                "action_id": f"hot_list_overflow_{acct_id}"[:150],
+                "options": [
+                    {"text": {"type": "plain_text", "text": f":email: Draft ({first_pid})"},
+                     "value": json.dumps(payload)},
+                    {"text": {"type": "plain_text", "text": ":zzz: Snooze 30d"},
+                     "value": json.dumps({**payload, "op": "snooze"})},
+                    {"text": {"type": "plain_text", "text": ":bust_in_silhouette: View in SFDC"},
+                     "value": json.dumps({**payload, "op": "view"})},
+                ],
+            },
+        })
+
+    # Footer: library freshness
+    try:
+        from jobs.play_library import load as load_library
+        lib = load_library()
+        if lib:
+            built = lib.get("built_at", "")
+            n_deals = lib.get("source_deals_analyzed", 0)
+            blocks.append({"type": "context",
+                "elements": [{"type": "mrkdwn", "text": (
+                    f"_Play Library backing these scores: {n_deals} analyzed deals · built {built}_"
+                )}]})
+    except Exception:
+        pass
+
+    return blocks
 
 
 def _build_team_intel_tab(client, user_id):
