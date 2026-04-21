@@ -4,6 +4,222 @@ All email drafts are created in Gmail under `Claude Drafts/*` labels. Each workf
 
 ---
 
+## 0. Golden Standard — Outbound Sales Emails (AI-Generated)
+
+This is the canonical spec for **AI-generated outbound sales emails** produced by `jobs/pipeline_drafter.py`, `jobs/granola_followup.py`, `jobs/post_meeting_followup.py`, and `jobs/stale_opp_drafter.py`. It does NOT apply to channel-alert drafts (Section 1 below) — those are operational/transactional and stay fixed.
+
+### Three contexts, three shapes
+
+Outbound sales emails fall into one of three contexts. Each has its own structure, opener, and CTA posture. **Do not force a post-meeting structure onto a cold prospecting email or vice versa** — this is the root cause of "feels robotic" complaints.
+
+| Context | When it fires | Structure | Opener | CTA posture |
+|---|---|---|---|---|
+| **A. Prospecting** | Hot List draft · Plays tab draft · any account with no open SFDC opp on the pitched product | Warm opener + minimal AM intro → *Why I'm reaching out* (signal) → *Why Ramp for you* (feature→benefit w/ value math) → Outcome-specific CTA → Booking link | 1 sentence AM intro + 1 line naming the signal | Outcome-specific: "15-min walkthrough of Treasury yield on your current cash balance" — not "quick chat" |
+| **B. Post-meeting follow-up** | Within hours of a real Gong/Granola call with the account | Warm greeting referencing the call → *Quick recap* → *{Customer}'s Next Steps* → *My Next Steps* → *Resources* | "Thanks for the time today — [specific quote or moment]" | Working session with flexible time window, grounded in what was discussed |
+| **C. Re-engage stale** | Open SFDC opp + 15+ days of inactivity OR warm lead we lost momentum with | Acknowledge gap (no apology, just own it) → *Where we left off* → *What's changed worth revisiting* → Refreshed CTA | 1 sentence acknowledging the time gap | Specific 2-day time-window ask on a refreshed angle |
+
+### Cross-context rules (all three contexts follow these)
+
+**Tone**
+- AM first-person voice ("I noticed", "I'll send"), not company voice ("Ramp offers")
+- Contractions natural, short sentences, no marketing fluff
+- No "I hope this email finds you well", "just circling back", "touching base", "I wanted to reach out" as an opener
+- No guilt-tripping about unanswered emails
+- No language that reveals automation ("I was notified", "our system flagged", etc.)
+
+**Grounding**
+- Every specific claim (dollar amount, vendor name, feature fit, named stakeholder) must trace to real data — transcript, email body, BoB signal, or SFDC notes. Never invent.
+- If no specific data is on file for a product, keep that bullet generic and brief — don't fabricate to fill space.
+- Real Ramp capabilities only: Card (95bps cashback, spend controls, ERP sync, auto-coding), Bill Pay (NetSuite/QBO sync, approval workflows, bulk batching, vendor portal, AP automation), Treasury (~4.5% yield, FDIC pass-through, same-day transfers, multi-entity accounts), Plus (custom fields, per-entity controls, SAML SSO, SCIM, AI agents, advanced policies, dedicated support), Procurement (intake forms, 3-way match, contract renewal tracking, vendor onboarding).
+
+**CTA**
+- Always outcome-specific, never "quick chat" or "can we grab time"
+- If prospecting: frame the outcome that matters to them ("15-min walkthrough of Treasury yield at $4.5M balance = ~$17K/mo")
+- If post-meeting/re-engage: tie to what was discussed ("30-min working session to set up the policy agent we talked about")
+- Always include an inline `Book a call: {link}` line before the signature (and the signature also has it — duplication is intentional since some clients hide signatures)
+
+**Structure / formatting**
+- Section headers in `<strong>` (e.g., `<strong>Quick recap</strong>`), bullets in `<ul><li>`
+- No markdown — HTML only (`<strong>`, `<ul>`, `<li>`, `<a>`, `<br>`, `<p>`)
+- Word count: 180-250 for prospecting, 200-350 for post-meeting and re-engage
+- Resources section only when real links are in the payload (never fabricate URLs)
+
+### Context A — Prospecting (worked examples)
+
+**A.1 — P1 Plus-gated ERP (Tiny Health, Zoho Books, SAAS_LEGACY tier)**
+
+Subject: `Ramp Plus + Zoho Books — a few specific wins for Tiny Health`
+
+> Hi Kristine,
+>
+> I'm Greg, your AM for Ramp. Saw you're on Zoho Books with 30+ users on the legacy Ramp tier — there are three Plus-gated pieces that would be worth 15 min of your time to walk through:
+>
+> <strong>Why I'm reaching out</strong>
+> <ul>
+>   <li>Zoho Books as your GL puts you right in the sweet spot for Plus — the integration-layer features only unlock above the legacy tier.</li>
+>   <li>30+ users + no SAML SSO means every new hire is manual setup in Ramp. That's a rollout bottleneck we can fix.</li>
+> </ul>
+>
+> <strong>Why Plus for Tiny Health</strong>
+> <ul>
+>   <li><strong>Custom fields synced to Zoho dimensions</strong> — your Ramp transactions land in the right Zoho chart-of-accounts automatically, cutting month-end reconciliation.</li>
+>   <li><strong>AI coding agent</strong> — auto-categorizes spend into the right Zoho GL accounts based on vendor + memo patterns, so your accounting team stops doing it line-by-line.</li>
+>   <li><strong>SAML SSO + SCIM provisioning</strong> — new hires land in Ramp automatically via your IDP. For 30+ users this pays back immediately.</li>
+>   <li><strong>Advanced approval policies</strong> — you can build multi-level approval chains that mirror your Zoho journal-entry authorization structure, instead of the basic single-approver workflow on the current tier.</li>
+> </ul>
+>
+> <strong>Next step</strong>
+> <ul>
+>   <li>Worth a 20-min working session to walk through the Zoho integration + SSO setup live so you can see exactly what changes. Any chance Tuesday afternoon or Wednesday morning this week works?</li>
+> </ul>
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+>
+> Greg
+> Account Manager @ Ramp
+
+**A.2 — P12 Treasury opp (account with $8M GLA, not on Treasury)**
+
+Subject: `~$30K/mo in Treasury yield sitting on the table at Aerodyne Research`
+
+> Hi Jane,
+>
+> Greg here — your Ramp AM. You've got ~$8M in connected bank accounts earning close to nothing. On Ramp Treasury at ~4.5% that's roughly $30K/mo in recovered yield — I wanted to flag it specifically because nothing about it is a lockup or minimum-balance tradeoff.
+>
+> <strong>Why this is worth 15 min</strong>
+> <ul>
+>   <li><strong>Same-day liquidity</strong> — no lockup, no minimum. Move any amount in or out the same day via the same Ramp dashboard you already use.</li>
+>   <li><strong>FDIC pass-through</strong> up to $225M across partner banks. Not a brokered sweep, not a money-market fund — cash stays in FDIC-insured accounts.</li>
+>   <li><strong>Operational win</strong> — you're already running AP through Ramp. Treasury consolidates the float side so you're not managing cash across two platforms.</li>
+> </ul>
+>
+> <strong>Next step</strong>
+> <ul>
+>   <li>I can walk through the yield model on your exact balance in 15 min — you'll see to the dollar what you'd recover monthly and where it ends up. Later this week good?</li>
+> </ul>
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+>
+> Greg
+> Account Manager @ Ramp
+
+**A.3 — P5 PO-in-memo → Procurement (account paying bills with "PO-123" in memos, not on Procurement Add-on)**
+
+Subject: `You're running a PO process in bill memos — Procurement replaces that`
+
+> Hi Carlos,
+>
+> Greg, your AM at Ramp. Noticed 156 of your last 90 days of bills reference POs in the memo field ("PO: 4920172", "Purchase Order #…", etc.). That's a shadow Procurement process in a spreadsheet — Ramp's Procurement Add-on solves exactly this.
+>
+> <strong>Why I'm reaching out</strong>
+> <ul>
+>   <li>You're clearly running POs ahead of bills today, manually. 156 bills with PO references in 90 days is a real process, not an edge case.</li>
+>   <li>You're on Bill Pay but not the Procurement Add-on — the piece that formalizes PO creation, approval routing, and 3-way match is missing.</li>
+> </ul>
+>
+> <strong>What Procurement replaces for you</strong>
+> <ul>
+>   <li><strong>Intake forms</strong> auto-generate POs when employees request spend — no more tracking in spreadsheets.</li>
+>   <li><strong>3-way match</strong> on bill import — Ramp matches invoice → PO → receipt and flags mismatches before you pay.</li>
+>   <li><strong>Approval routing tied to the PO</strong> — not to the bill after the fact. Pre-spend control, not post-spend cleanup.</li>
+>   <li><strong>Contract + renewal tracker</strong> — renewal dates and contract terms attached to the vendor so they stop sneaking by.</li>
+> </ul>
+>
+> <strong>Next step</strong>
+> <ul>
+>   <li>30 min to walk through how your existing bill flow gets rebuilt around POs. Tuesday or Wednesday of next week?</li>
+> </ul>
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+>
+> Greg
+> Account Manager @ Ramp
+
+### Context B — Post-meeting follow-up (worked example)
+
+Already strong today in `granola_followup.py` + `post_meeting_followup.py`. Keep structure:
+
+Subject: `Ramp follow-up — BP + Treasury setup`
+
+> Hi Jeremy, great chat today — thanks for walking through the check workflow + your cash position.
+>
+> <strong>Quick recap</strong>
+> <ul>
+>   <li>You're printing 2-3 checks/day for rent + cleaners — Ramp Bill Pay automates this and flags the card-payable vendors so you can earn cashback on spend you're currently moving by check.</li>
+>   <li>Short-staffed for 2-3 years; want to streamline AP — Bill Pay's Zoho integration eliminates manual invoice matching and the approval routing replaces the email-thread approvals you're doing today.</li>
+>   <li>You manage 675 real-estate agents as independent contractors — Ramp can handle 1099 vendor payments via ACH with built-in W-9 collection, no separate vendor onboarding process.</li>
+>   <li>Interested in eliminating Bill Pay fees — Treasury waives all ACH ($0.60) and check ($2.00) fees AND earns 4.5% yield on your operating balance.</li>
+> </ul>
+>
+> <strong>Jeremy's Next Steps</strong>
+> <ul>
+>   <li>Identify 3-5 current check vendors to test with Bill Pay first.</li>
+>   <li>Pull the target balance you'd move to Treasury so we can model yield.</li>
+>   <li>Review current spending limits on your 15-20 cardholders.</li>
+> </ul>
+>
+> <strong>My Next Steps</strong>
+> <ul>
+>   <li>I'll send the Bill Pay setup checklist + vendor onboarding guide.</li>
+>   <li>Coordinating our implementation team to support the BP + Treasury setup.</li>
+>   <li>Can we grab 45 min Tuesday or Wednesday to walk through Bill Pay + Treasury setup live? I'll send a couple slots.</li>
+> </ul>
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+>
+> Greg
+> Account Manager @ Ramp
+
+### Context C — Re-engage stale (worked example)
+
+Open SFDC opp + 15+ days since last touch.
+
+Subject: `Picking back up on Treasury for Aerodyne`
+
+> Hi Jane,
+>
+> Realized it's been about three weeks on our end since we talked through the Treasury setup — wanted to pick back up before your month-end close lands.
+>
+> <strong>Where we left off</strong>
+> <ul>
+>   <li>You were running the 4.5% yield math against your ~$8M balance with your team — ~$30K/mo in recovered yield was the number we landed on.</li>
+>   <li>Open question was the FDIC pass-through structure vs. your current Wells Fargo sweep — I've since put together the side-by-side.</li>
+> </ul>
+>
+> <strong>What's changed worth revisiting</strong>
+> <ul>
+>   <li>Treasury's multi-entity account setup shipped last week — if your 3 subsidiaries need separate books, we can model that now.</li>
+>   <li>FDIC pass-through expanded to $225M coverage across partner banks — resolves the concentration question you raised.</li>
+> </ul>
+>
+> <strong>Next step</strong>
+> <ul>
+>   <li>30-min working session to walk through the multi-entity setup with your actual balances. Thursday morning or Friday afternoon this week?</li>
+> </ul>
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+>
+> Greg
+> Account Manager @ Ramp
+
+### Context detection (how code picks which prompt to use)
+
+Implemented in `jobs/pipeline_drafter.py` at draft time:
+
+1. **If `play_id` is set AND the opp is synthetic** (play_hooks-built, no real SFDC opp on the pitched product) → **Context A: Prospecting**.
+2. **If the payload carries `current_meeting_attendees` / `current_call_participants`** (came from `granola_followup` or `post_meeting_followup`) → **Context B: Post-meeting**. (Note: those drafters don't route through pipeline_drafter today — they have their own prompts. Keep it that way.)
+3. **Otherwise** (real open opp, no current meeting) → **Context C: Re-engage stale**. If a `play_id` is also set, use the play hook's pitch angle to drive the "What's changed worth revisiting" section.
+
+### What NOT to do
+
+- Don't use "Takeaways" as a section header unless there's a real conversation to take aways FROM. For prospecting, it's "Why I'm reaching out" + "Why Ramp for you". For re-engage stale, it's "Where we left off" + "What's changed worth revisiting".
+- Don't lead with "Hope you're doing well!" or "I wanted to reach out to you about…". Start with the signal or the reason.
+- Don't stuff the email with every feature Ramp sells. 3-4 features max, all pairing to a specific pain or signal on the account.
+- Don't name dollar figures the customer didn't give you. ("Our system sees $8M in your accounts" is fine if it's in BoB data — but don't quote $8M as a customer statement if they never said it.)
+- Don't apologize for gaps in re-engage emails. Own the gap and move forward.
+
+---
+
 ## 1. Channel Alert Drafters (Fixed Templates)
 
 These use **fixed HTML templates** from `templates/emails.py`. No AI generation — same structure every time.
