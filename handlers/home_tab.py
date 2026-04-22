@@ -1804,13 +1804,28 @@ def _team_cp_fetch(user_id: str, lookback_days: int, force: bool = False):
     return lb, md
 
 
-def _team_cp_cached(user_id: str, lookback_days: int):
-    """Return cached data or None. Non-blocking."""
+def _team_cp_cached(user_id: str, lookback_days: int, allow_stale: bool = False):
+    """Return cached data or None. Non-blocking.
+
+    If allow_stale=True, returns any cache entry regardless of TTL (the caller
+    is responsible for kicking a background refresh). This is the right thing
+    for the Team Intel tab builder: stale leaderboard + deals + Expand buttons
+    on screen beats a "Loading..." placeholder that hides everything between
+    re-publishes.
+    """
     key = (user_id or "default", lookback_days)
     c = _team_cp_cache.get(key)
-    if c and (time.time() - c.get("fetched_at", 0) < _TEAM_CP_TTL_SEC):
+    if not c:
+        return None
+    if allow_stale or (time.time() - c.get("fetched_at", 0) < _TEAM_CP_TTL_SEC):
         return c["leaderboard"], c["my_deals"]
     return None
+
+
+def _team_cp_age_sec(user_id: str, lookback_days: int) -> float:
+    key = (user_id or "default", lookback_days)
+    c = _team_cp_cache.get(key)
+    return (time.time() - c.get("fetched_at", 0)) if c else float("inf")
 
 
 def _team_cp_fetch_async(user_id: str, lookback_days: int, client=None) -> None:
@@ -2160,11 +2175,13 @@ def _build_team_intel_tab(client, user_id):
         blocks.append({"type": "divider"})
 
     # ── Fetch data ──────────────────────────────────────────────────────────
-    # Non-blocking: serve cached data instantly. If cache is cold/stale,
-    # render a placeholder and kick a background refresh. Snowflake queries
-    # for the leaderboard + top deals take 15-45s each — blocking the
-    # first render makes the tab feel broken.
-    cached = _team_cp_cached(user_id, lookback_days)
+    # Non-blocking: serve cached data instantly. If cache is cold (never
+    # populated), render a placeholder and kick a background refresh. If
+    # cache is STALE (populated but past TTL), still render it and show a
+    # small "refreshing..." banner — beats hiding Expand buttons between
+    # re-publishes.
+    fresh = _team_cp_cached(user_id, lookback_days)
+    cached = fresh or _team_cp_cached(user_id, lookback_days, allow_stale=True)
     if cached is None:
         _team_cp_fetch_async(user_id, lookback_days, client=client)
         blocks.append({"type": "section",
@@ -2174,7 +2191,16 @@ def _build_team_intel_tab(client, user_id):
                 "automatically once it's ready. Nightly cache warm keeps this instant after the first load._"
             )}})
         return blocks
+
     leaderboard, my_deals = cached
+    if fresh is None:
+        # Stale-but-present: render everything, kick background refresh, show banner
+        _team_cp_fetch_async(user_id, lookback_days, client=client)
+        age_min = int(_team_cp_age_sec(user_id, lookback_days) / 60)
+        blocks.append({"type": "context",
+            "elements": [{"type": "mrkdwn", "text": (
+                f":arrows_counterclockwise: _Refreshing — showing data from {age_min}m ago while the update runs._"
+            )}]})
 
     if leaderboard is None or leaderboard.empty:
         blocks.append({"type": "section",

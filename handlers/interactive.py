@@ -1651,9 +1651,11 @@ def register_interactive_handlers(app):
     def handle_team_intel_deal_toggle(ack, body, client):
         """Expand/collapse a deal card in Team Intel tab."""
         ack()
-        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         action = body.get("actions", [{}])[0]
+        user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         opp_id = action.get("value") or ""
+        logger.info("team_intel_deal_toggle received: user=%s action_id=%s value=%s",
+                    user_id, action.get("action_id"), opp_id)
         if not opp_id:
             return
 
@@ -1661,16 +1663,21 @@ def register_interactive_handlers(app):
         expanded = _team_intel_expanded.setdefault(user_id, set())
         if opp_id in expanded:
             expanded.remove(opp_id)
+            logger.info("team_intel_deal_toggle: collapsed opp=%s", opp_id)
         else:
             expanded.add(opp_id)
+            logger.info("team_intel_deal_toggle: expanded opp=%s", opp_id)
 
         def _refresh():
             try:
                 from handlers.home_tab import _build_home_blocks
                 blocks = _build_home_blocks(client, user_id)
+                logger.info("team_intel_deal_toggle: re-publishing %d blocks for user=%s",
+                            len(blocks), user_id)
                 client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
             except Exception as e:
-                logger.error("Home refresh after team_intel deal toggle failed: %s", e)
+                logger.error("Home refresh after team_intel deal toggle failed: %s", e,
+                             exc_info=True)
 
         threading.Thread(target=_refresh, daemon=True).start()
 
