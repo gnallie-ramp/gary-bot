@@ -15,7 +15,7 @@ Outbound sales emails fall into one of three contexts. Each has its own structur
 | Context | When it fires | Structure | Opener | CTA posture |
 |---|---|---|---|---|
 | **A. Prospecting** | Hot List draft · Plays tab draft · any account with no open SFDC opp on the pitched product | Warm opener + minimal AM intro → *Why I'm reaching out* (signal) → *Why Ramp for you* (feature→benefit w/ value math) → Outcome-specific CTA → Booking link | 1 sentence AM intro + 1 line naming the signal | Outcome-specific: "15-min walkthrough of Treasury yield on your current cash balance" — not "quick chat" |
-| **B. Post-meeting follow-up** | Within hours of a real Gong/Granola call with the account | Warm greeting referencing the call → *Quick recap* → *{Customer}'s Next Steps* → *My Next Steps* → *Resources* | "Thanks for the time today — [specific quote or moment]" | Working session with flexible time window, grounded in what was discussed |
+| **B. Post-meeting follow-up** | Within hours of a real Gong/Granola call with the account | Warm greeting referencing the call → ONE **product section per product discussed** (Treasury / Procurement / Plus / Card Consolidation etc.) → warm close with follow-up woven in → "Let me know what works best!" → optional "Helpful resources:" block | "Thanks for walking me through [specific thing they mentioned]" | Woven into the close paragraph — flexible time, tied to a specific deliverable they agreed to |
 | **C. Re-engage stale** | Open SFDC opp + 15+ days of inactivity OR warm lead we lost momentum with | Acknowledge gap (no apology, just own it) → *Where we left off* → *What's changed worth revisiting* → Refreshed CTA | 1 sentence acknowledging the time gap | Specific 2-day time-window ask on a refreshed angle |
 
 ### Cross-context rules (all three contexts follow these)
@@ -137,38 +137,43 @@ Subject: `You're running a PO process in bill memos — Procurement replaces tha
 
 ### Context B — Post-meeting follow-up (worked example)
 
-Already strong today in `granola_followup.py` + `post_meeting_followup.py`. Keep structure:
+Organize the body BY PRODUCT DISCUSSED, not by recap/next-steps blocks. Every product the call meaningfully touched gets its own section. Bullets pair the customer's stated situation with the specific Ramp capability. Narrative paragraphs are fine when the topic is a value framing rather than a feature list.
 
-Subject: `Ramp follow-up — BP + Treasury setup`
+Subject: `Ramp Follow-Up — Treasury, Procurement + Vendor Optimization`
 
-> Hi Jeremy, great chat today — thanks for walking through the check workflow + your cash position.
+> Hi James and Amber, great meeting with you today — thanks for walking me through how you're using Ramp and the Truist vendor mix.
 >
-> <strong>Quick recap</strong>
+> <strong>Treasury — 2% yield vs. your current 1.7%</strong>
 > <ul>
->   <li>You're printing 2-3 checks/day for rent + cleaners — Ramp Bill Pay automates this and flags the card-payable vendors so you can earn cashback on spend you're currently moving by check.</li>
->   <li>Short-staffed for 2-3 years; want to streamline AP — Bill Pay's Zoho integration eliminates manual invoice matching and the approval routing replaces the email-thread approvals you're doing today.</li>
->   <li>You manage 675 real-estate agents as independent contractors — Ramp can handle 1099 vendor payments via ACH with built-in W-9 collection, no separate vendor onboarding process.</li>
->   <li>Interested in eliminating Bill Pay fees — Treasury waives all ACH ($0.60) and check ($2.00) fees AND earns 4.5% yield on your operating balance.</li>
+>   <li>You're running about $500/year in ACH + check fees on ~27 monthly bills — Treasury's fee-free ACH eliminates that line entirely.</li>
+>   <li>Currently earning 1.7% on Truist money market and 0% on checking — <a href="https://ramp.com/treasury">Ramp Treasury</a>'s 2% with same-day liquidity means no trade-off between yield and access.</li>
+>   <li>You mentioned being open to moving <em>just a portion</em> of funds to start — the business account is designed for exactly that: no minimums, no lockup.</li>
 > </ul>
 >
-> <strong>Jeremy's Next Steps</strong>
+> <strong>Procurement — PO workflow + 3-way match</strong>
 > <ul>
->   <li>Identify 3-5 current check vendors to test with Bill Pay first.</li>
->   <li>Pull the target balance you'd move to Treasury so we can model yield.</li>
->   <li>Review current spending limits on your 15-20 cardholders.</li>
+>   <li>We covered how your team currently runs approvals in email threads — <a href="https://ramp.com/procurement">Procurement</a> replaces that with intake forms that auto-generate POs and route approval to the right approver.</li>
+>   <li>You asked about invoice-to-PO matching — 3-way match compares bill ↔ PO ↔ receipt on import and blocks payments that exceed your thresholds.</li>
+>   <li>Contract + renewal tracking was the other piece — vendor terms attached to the PO so renewals don't sneak up.</li>
 > </ul>
 >
-> <strong>My Next Steps</strong>
-> <ul>
->   <li>I'll send the Bill Pay setup checklist + vendor onboarding guide.</li>
->   <li>Coordinating our implementation team to support the BP + Treasury setup.</li>
->   <li>Can we grab 45 min Tuesday or Wednesday to walk through Bill Pay + Treasury setup live? I'll send a couple slots.</li>
-> </ul>
+> <strong>Card Consolidation</strong>
 >
-> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+> Worth revisiting with the team — your AP team already caught a vendor accepting fee-free cards through our AI suggestion, which was exactly the kind of optimization Ramp's built for. Happy to pull the full list of 7-8 vendors you're paying via ACH that other customers pay by card — that's an immediate cashback opportunity sitting in your current vendor file.
+>
+> Ready to dive deeper into Treasury setup whenever you've had a chance to review the vendor list. Happy to grab 30 min later this week to walk through how the 2% business account sits alongside your current Truist setup and where Procurement would plug in for your AP team — any time good for you?
+>
+> Let me know what works best!
 >
 > Greg
-> Account Manager @ Ramp
+>
+> Book a call: https://ramp-com.chilipiper.com/me/gregory-nallie/ramp
+
+**What's different from the old structure:** no "Quick recap" / "James's Next Steps" / "My Next Steps" formal headers — each product gets its own section titled with the specific angle, action items live inside the product context (or in the close paragraph), and hyperlinks are woven inline instead of tacked on at the end. Three products discussed = three sections. If a product came up only in passing, skip it.
+
+**When to use a narrative paragraph vs. bullets:** bullets for feature-dense discussions (Treasury yield math, Procurement feature fit). Paragraphs for value-framing topics (Card Consolidation — the pitch is "consolidation beats cashback difference", which reads better as prose than a feature list).
+
+**Resources:** hyperlinks embedded inline in bullets is the default. Only add a separate `<p><strong>Helpful resources:</strong></p>` block at the end if there are 2+ useful links that didn't find a natural home in the product sections.
 
 ### Context C — Re-engage stale (worked example)
 

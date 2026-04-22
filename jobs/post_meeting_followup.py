@@ -428,63 +428,85 @@ Return a JSON object with these exact keys:
 - "follow_up_email_to": string — best email to send follow-up to (from participant list, or empty)
 - "follow_up_email_subject": string — format: "Ramp Follow-Up - <brief summary of key topics discussed>"
 - "follow_up_email_body": string — HTML-formatted post-meeting email that
-    sounds like a real AM wrote it, not an AI template.
+    reads like a consultant recapping value, not a project manager handing out
+    homework. The gold standard is an email organized BY PRODUCT / TOPIC
+    DISCUSSED, not by "recap / their next steps / my next steps" blocks.
 
-    STRUCTURE — open with a warm, specific greeting line (1 sentence, NOT
-    "I hope this finds you well"), then move into the recap. Example opener:
-      <p>Hi [First Name], great chat today — thanks for walking through the AP setup.</p>
-    Then follow with these sections (headers in <strong>, bullets in <ul><li>):
+    STRUCTURE:
 
-    <strong>Quick recap</strong>
-    <ul>
-      <li>3-5 bullets summarizing what they said on the call and the Ramp
-          angle that maps to it. Write naturally — not every bullet has to
-          be "pain → feature". Some bullets can just name a specific number
-          or vendor they mentioned and why it matters. Vary the sentence
-          structure. Cite exact numbers, vendor names, and stakeholder
-          names from the transcript — never generic.</li>
-    </ul>
+    1) Warm opener (1-2 sentences). Reference a SPECIFIC thing they said +
+       1 sentence on why you're excited to help. Example:
+         <p>Hi James and Amber, great meeting with you today — thanks for
+            walking me through how you're using Ramp and the Truist
+            vendor mix.</p>
 
-    <strong>[Customer First Name]'s Next Steps</strong>
-    <ul>
-      <li>2-4 bullets, 2nd person, conversational. Prefer natural
-          phrasing like "Grab the policy PDF when you can" over
-          "[Name]: Do X". Route to named stakeholders when clear.
-          Replace [Customer First Name] in the header with the actual
-          first name of the primary recipient.</li>
-    </ul>
+    2) ONE <strong> section PER product or value topic discussed on the
+       call — Card, Bill Pay, Treasury, Procurement, Plus, Card
+       Consolidation, Vendor Optimization, etc. Every product they
+       mentioned gets a dedicated section (could be 2-5 sections total).
+       Section headers should name the product + the specific angle, e.g.
+         <strong>Treasury — 2% yield vs. your current 1.7%</strong>
+         <strong>Procurement — PO workflow + 3-way match</strong>
+         <strong>Card Consolidation</strong>
 
-    <strong>My Next Steps</strong>
-    <ul>
-      <li>1-3 bullets, 1st person, conversational. End with ONE specific
-          follow-up ask — either a working session with a flexible
-          time suggestion ("any chance we could grab 30 min later this
-          week?"), or a specific deliverable with a date. Avoid the rigid
-          "next Tuesday or Wednesday" pattern unless the transcript
-          specifically implies that timing.</li>
-    </ul>
+       Each section is either:
+       (a) 2-4 feature→benefit bullets pairing what THEY said with the
+           specific Ramp capability that addresses it. Bullets cite their
+           exact numbers/vendors/names from the transcript. Inline
+           hyperlinks to help-articles from the AVAILABLE RAMP RESOURCE
+           LINKS are encouraged when they add context:
+             <li>Currently earning 1.7% on Truist money market — Ramp
+                 <a href="https://ramp.com/treasury">Treasury</a>'s 2%
+                 with same-day liquidity means no trade-off between yield
+                 and access.</li>
+       (b) A 1-2 sentence narrative paragraph when the topic is a value
+           framing (like Card Consolidation) rather than a feature list.
+           Use this when it reads more naturally as prose:
+             <p>Worth exploring with your founders — the operational
+                efficiency of having everything in one platform often
+                outweighs the cashback trade-off with Capital One.</p>
 
-    <strong>Resources</strong>
-    <ul>
-      <li>2-4 Ramp help-article links from the AVAILABLE RAMP RESOURCE
-          LINKS above. Format: <a href="URL">Title</a>. Omit this section
-          entirely if no resources are provided.</li>
-    </ul>
+    3) Warm close paragraph — natural language, not a formal Next Steps
+       block. Weave the specific follow-up action INTO the close, don't
+       break it out. Example:
+         <p>Ready to dive deeper into Treasury setup whenever you've had
+            a chance to review the vendor list. Happy to grab 30 min
+            later this week to walk through how the 2% business account
+            sits alongside your current Truist setup — any time good
+            for you?</p>
 
-    After the 4 sections, add one line before the signature:
-      <p>Book a call: <a href="{booking_link}">{booking_link}</a></p>
+    4) Sign-off line + blank line:
+         <p>Let me know what works best!</p>
+         <p>[Owner first name]</p>
 
-    TONE: warm, direct, contractions natural. Write like a real AM who
-    just got off the call, not a structured AI. Use short sentences.
-    Vary bullet phrasing. No "I hope this email finds you well", no
-    "just circling back", no "touching base", no generic nurture talk.
+    5) OPTIONAL "Helpful resources:" block after the sign-off — include
+       only if there are 2+ relevant links from the AVAILABLE RAMP
+       RESOURCE LINKS that weren't already hyperlinked inline in the
+       product sections. If you already inlined the links, skip this
+       block entirely. Format:
+         <p><strong>Helpful resources:</strong></p>
+         <ul><li><a href="URL">Title</a></li>...</ul>
 
-    HARD RULES — violations are failures:
-    * Do NOT say "I was notified" / anything implying an automated alert
-    * Do NOT guilt-trip about unanswered emails
-    * Do NOT invent facts. Every recap bullet must be traceable to the transcript.
-    * Do NOT use markdown. HTML tags only: <strong>, <ul>, <li>, <a>, <br>, <p>
-    * 200-350 words total. Shorter + warmer beats longer + structured.
+    6) Book a call line at the very end:
+         <p>Book a call: <a href="{booking_link}">{booking_link}</a></p>
+
+    STRICT RULES:
+    * Do NOT use "Quick recap", "[Name]'s Next Steps", or "My Next
+      Steps" section headers — those formal blocks feel robotic. Weave
+      the action content into the product sections and the warm close.
+    * Cover EVERY product the call meaningfully discussed — don't skip
+      a product just because the discussion was shorter. If the call
+      touched Treasury + Procurement + Card, you need 3 sections.
+    * Never invent facts. Every bullet must be traceable to the
+      transcript. Cite their specific numbers, vendor names,
+      stakeholder names.
+    * Do NOT say "I was notified" / anything implying automation.
+    * Do NOT guilt-trip about unanswered emails.
+    * Write like a real AM who just got off the call. Short sentences.
+      Natural phrasing. Contractions fine.
+    * HTML tags only: <strong>, <ul>, <li>, <a>, <br>, <p>. No markdown.
+    * 250-450 words. Shorter + warmer + product-organized beats
+      longer + recap-blocks.
 - "follow_up_email_cc": string — other emails to CC, comma-separated, or empty
 - "opps": list of objects, each with:
     - "product": string (one of "Card Expansion", "Bill Pay Expansion", "Travel Expansion", "Treasury Expansion", "Procurement")
