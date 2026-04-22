@@ -599,8 +599,10 @@ def _send_glass_style_dm(results: list[dict], client, dm_target=None):
                 if not next_step_due:
                     next_step_due = (datetime.utcnow() + timedelta(days=7)).strftime("%Y-%m-%d")
 
+                from config import CP_WINDOW_MULTIPLIER
                 ntr_rate = NTR_RATES.get(product, 0)
-                est_cp = float(amount) * ntr_rate * 3 if amount and ntr_rate else 0
+                window_mult = CP_WINDOW_MULTIPLIER.get(product, 3)
+                est_cp = float(amount) * ntr_rate * window_mult if amount and ntr_rate else 0
 
                 subtype = EXPANSION_PRODUCT_MAP.get(product, product)
                 opp_name = f"{account_name} - {subtype}"

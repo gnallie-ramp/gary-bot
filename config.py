@@ -77,12 +77,31 @@ GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 # ── NTR Rates (single source of truth) ────────────────────────────────────────
-# Card 95bps | Bill Pay 15bps | Treasury 5bps | Travel 350bps
+# Transactional products: Card 95bps | Bill Pay 15bps | Treasury 5bps | Travel 350bps
+# Subscription products: SaaS (Plus) 7.5% | Procurement 7.5%
 NTR_RATES = {
     "Card Expansion": 0.0095,
     "Bill Pay Expansion": 0.0015,
     "Treasury Expansion": 0.0005,
     "Travel Expansion": 0.035,
+    "SaaS": 0.075,
+    "Procurement": 0.075,
+}
+
+# Comp window multiplier (used when computing estimated CP for display).
+# Transactional products accrue CP over the 90-day post-close window (= 3
+# months × monthly). Subscription products accrue over 6 months with a
+# product-specific accelerator: SaaS F2P = 1.5x (→ 9-month effective),
+# Procurement = 2.0x (→ 12-month effective). Renewal accelerators (>110% = 3x)
+# and Plus renewal kickers aren't modeled here — this is a base-case estimate,
+# actual comp may be higher.
+CP_WINDOW_MULTIPLIER = {
+    "Card Expansion": 3,
+    "Bill Pay Expansion": 3,
+    "Treasury Expansion": 3,
+    "Travel Expansion": 3,
+    "SaaS": 9,          # 6mo × 1.5x F2P bonus
+    "Procurement": 12,  # 6mo × 2.0x
 }
 
 # Keyed by spend-acceleration delta column names
