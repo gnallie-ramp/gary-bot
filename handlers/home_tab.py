@@ -1766,6 +1766,10 @@ _team_intel_show_library = {}  # user_id -> bool
 _TEAM_CP_TTL_SEC = 3600
 
 
+import threading as _threading  # noqa: E402 — used for Team Intel async warm
+_team_cp_refreshing: set = set()  # set of (user_id, lookback_days) currently refreshing
+
+
 def _team_cp_fetch(user_id: str, lookback_days: int, force: bool = False):
     """Return (leaderboard_df, my_deals_df) from cache or a fresh query."""
     from core.snowflake_client import run_query
@@ -1798,6 +1802,79 @@ def _team_cp_fetch(user_id: str, lookback_days: int, force: bool = False):
 
     _team_cp_cache[key] = {"leaderboard": lb, "my_deals": md, "fetched_at": now}
     return lb, md
+
+
+def _team_cp_cached(user_id: str, lookback_days: int):
+    """Return cached data or None. Non-blocking."""
+    key = (user_id or "default", lookback_days)
+    c = _team_cp_cache.get(key)
+    if c and (time.time() - c.get("fetched_at", 0) < _TEAM_CP_TTL_SEC):
+        return c["leaderboard"], c["my_deals"]
+    return None
+
+
+def _team_cp_fetch_async(user_id: str, lookback_days: int, client=None) -> None:
+    """Kick a background refresh for this (user, window), deduplicated so
+    multiple tab opens don't stampede Snowflake. When done, re-publishes
+    the Home tab so the user sees the populated view without manual refresh."""
+    key = (user_id or "", lookback_days)
+    if key in _team_cp_refreshing:
+        return
+    _team_cp_refreshing.add(key)
+
+    def _run():
+        try:
+            _team_cp_fetch(user_id, lookback_days, force=True)
+            # Re-publish Home so the user sees the populated view
+            if client is not None:
+                try:
+                    blocks = _build_home_blocks(client, user_id)
+                    client.views_publish(user_id=user_id, view={"type": "home", "blocks": blocks})
+                except Exception as e:
+                    logger.debug("Home re-publish after team_cp warm failed: %s", e)
+        finally:
+            _team_cp_refreshing.discard(key)
+
+    _threading.Thread(target=_run, daemon=True, name=f"team-cp-warm-{user_id}-{lookback_days}").start()
+
+
+def warm_team_intel_on_startup(delay_sec: int = 60) -> None:
+    """Called once at boot — after `delay_sec`, refresh every registered
+    user's Team Intel cache at the default 180-day window."""
+    from core.user_registry import get_all_users
+
+    def _run():
+        time.sleep(delay_sec)
+        users = get_all_users() or {}
+        for uid, _u in users.items():
+            if not uid:
+                continue
+            try:
+                _team_cp_fetch(uid, 180, force=True)
+                logger.info("Team Intel warm: cached for user=%s (180d)", uid)
+            except Exception as e:
+                logger.warning("Team Intel warm failed for user=%s: %s", uid, e)
+
+    _threading.Thread(target=_run, daemon=True, name="team-intel-warm").start()
+
+
+def refresh_team_intel_all_users() -> dict:
+    """Scheduled job: refresh every registered user's Team Intel cache."""
+    from core.user_registry import get_all_users
+
+    users = get_all_users() or {}
+    count = {"users": len(users), "ok": 0, "failed": 0}
+    for uid, _u in users.items():
+        if not uid:
+            continue
+        try:
+            _team_cp_fetch(uid, 180, force=True)
+            count["ok"] += 1
+        except Exception as e:
+            logger.warning("Team Intel refresh failed for user=%s: %s", uid, e)
+            count["failed"] += 1
+    logger.info("Team Intel scheduled refresh complete: %s", count)
+    return count
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2083,13 +2160,21 @@ def _build_team_intel_tab(client, user_id):
         blocks.append({"type": "divider"})
 
     # ── Fetch data ──────────────────────────────────────────────────────────
-    try:
-        leaderboard, my_deals = _team_cp_fetch(user_id, lookback_days)
-    except Exception as e:
-        logger.error("team_intel fetch failed: %s", e)
+    # Non-blocking: serve cached data instantly. If cache is cold/stale,
+    # render a placeholder and kick a background refresh. Snowflake queries
+    # for the leaderboard + top deals take 15-45s each — blocking the
+    # first render makes the tab feel broken.
+    cached = _team_cp_cached(user_id, lookback_days)
+    if cached is None:
+        _team_cp_fetch_async(user_id, lookback_days, client=client)
         blocks.append({"type": "section",
-            "text": {"type": "mrkdwn", "text": ":warning: Couldn't load team CP data. Check logs."}})
+            "text": {"type": "mrkdwn", "text": (
+                ":hourglass_flowing_sand: *Loading team CP data…*\n"
+                "_First pull takes 20-45s against Snowflake. The page will refresh "
+                "automatically once it's ready. Nightly cache warm keeps this instant after the first load._"
+            )}})
         return blocks
+    leaderboard, my_deals = cached
 
     if leaderboard is None or leaderboard.empty:
         blocks.append({"type": "section",

@@ -362,6 +362,18 @@ def _start_scheduler():
         name="Hot List Rebuild",
     )
 
+    # Team Intel cache warm: Nightly 4:00 AM PT — pre-populates the Team CP
+    # leaderboard + top-deals cache for every registered user at the default
+    # 180-day window so the Team Intel tab opens instantly instead of
+    # blocking on 15-45s of Snowflake queries.
+    from handlers.home_tab import refresh_team_intel_all_users
+    scheduler.add_job(
+        _wrap(refresh_team_intel_all_users),
+        CronTrigger(hour=4, minute=0),
+        id="team_intel_warm",
+        name="Team Intel Cache Warm",
+    )
+
     # Activation alerts: Every 2 hours, weekdays 8AM-6PM PT
     # Detects new treasury, investment, first bill activations and DMs immediately
     scheduler.add_job(
@@ -462,6 +474,14 @@ def _start_scheduler():
         warm_on_startup(delay_sec=30)
     except Exception as e:
         logger.warning("Plays startup warm failed to launch: %s", e)
+
+    # Team Intel cache warm: same pattern, 60s after boot so Plays + bot
+    # startup aren't competing for Snowflake connections.
+    try:
+        from handlers.home_tab import warm_team_intel_on_startup
+        warm_team_intel_on_startup(delay_sec=60)
+    except Exception as e:
+        logger.warning("Team Intel startup warm failed to launch: %s", e)
 
     return scheduler
 
