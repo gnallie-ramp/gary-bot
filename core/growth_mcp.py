@@ -337,6 +337,35 @@ def get_account_details(
         return {}
 
 
+def get_opportunity_details(
+    opportunity_id: str,
+    user_id: Optional[str] = None,
+) -> dict:
+    """Fetch detailed metadata for a specific opportunity by SFDC ID.
+
+    Returns fields not always available in the Snowflake mart — specifically
+    `next_step_due_date` (SFDC custom field) and latest `next_step` text.
+    Shape: {"opportunity": {opportunity_id, name, stage_name, close_date,
+    next_step, next_step_due_date, owner, ...}}.
+
+    Returns {} on failure.
+    """
+    if not opportunity_id:
+        return {}
+    try:
+        rpc = _mcp_call(
+            "get_opportunity_details",
+            {"opportunity_id": opportunity_id},
+            user_id=user_id,
+            timeout=30,
+        )
+        payload = _extract_tool_payload(rpc)
+        return payload if isinstance(payload, dict) else {}
+    except Exception as e:
+        logger.debug("Growth MCP get_opportunity_details raised: %s", e)
+        return {}
+
+
 def update_opportunities(
     updates: list[dict],
     user_id: Optional[str] = None,

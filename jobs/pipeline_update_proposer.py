@@ -224,6 +224,30 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def _fetch_live_opp_state(opp_id: str) -> dict:
+    """Pull current live SFDC state for fields that aren't in our Snowflake
+    mart (e.g. next_step_due_date is a custom SFDC field). Uses Growth MCP.
+
+    Returns {} on failure — caller should treat missing keys as unknown,
+    not blank.
+    """
+    if not opp_id:
+        return {}
+    try:
+        from core.growth_mcp import get_opportunity_details
+        details = get_opportunity_details(opp_id) or {}
+        opp = details.get("opportunity") or {}
+        return {
+            "next_step": opp.get("next_step") or "",
+            "next_step_due_date": str(opp.get("next_step_due_date") or ""),
+            "stage": opp.get("stage_name") or "",
+            "close_date": str(opp.get("close_date") or ""),
+        }
+    except Exception as e:
+        logger.debug("Growth MCP live fetch failed for %s: %s", opp_id, e)
+        return {}
+
+
 def propose_updates_for_opp(opp: dict, account_name: str, row: dict,
                              email_history: list[dict] | None = None) -> dict:
     """Return a dict of proposed field changes for ONE opp.
@@ -240,6 +264,19 @@ def propose_updates_for_opp(opp: dict, account_name: str, row: dict,
     """
     if email_history is None:
         email_history = _fetch_email_history(opp.get("account_id") or row.get("account_id"))
+
+    # Pull live SFDC state for fields not in our Snowflake mart
+    # (next_step_due_date is a custom SFDC field that doesn't hit dim_sfdc_opportunities).
+    # Merge into opp so downstream code sees the current values.
+    live = _fetch_live_opp_state(opp.get("opp_id"))
+    if live:
+        # Prefer live values over cached row where we know live is authoritative
+        if live.get("next_step_due_date"):
+            opp["next_step_due_date"] = live["next_step_due_date"]
+        # next_step / stage / close_date also live-overwrite if they exist
+        for k in ("next_step", "stage", "close_date"):
+            if live.get(k) and not opp.get(k):
+                opp[k] = live[k]
 
     payload = _build_opp_payload(opp, account_name, row, email_history)
 
@@ -290,7 +327,9 @@ def propose_updates_for_opp(opp: dict, account_name: str, row: dict,
     if proposals.get("close_date") and str(proposals["close_date"]) == str(opp.get("close_date") or ""):
         proposals.pop("close_date", None)
 
-    # Reject any proposed dates that are in the past (proposer safety net)
+    # Reject any proposed dates that are in the past (proposer safety net).
+    # Also drop proposals that match OR regress the current value — we should
+    # only propose when there's a real forward-move to make.
     from datetime import date
     today = date.today()
     for date_field in ("next_step_due_date", "close_date"):
@@ -299,12 +338,27 @@ def propose_updates_for_opp(opp: dict, account_name: str, row: dict,
             continue
         try:
             parsed_d = date.fromisoformat(str(v))
-            if parsed_d < today:
-                logger.info("Dropping past-dated %s=%s for opp %s",
-                            date_field, v, opp.get("opp_id"))
-                proposals.pop(date_field, None)
         except (ValueError, TypeError):
             proposals.pop(date_field, None)
+            continue
+        if parsed_d < today:
+            logger.info("Dropping past-dated %s=%s for opp %s",
+                        date_field, v, opp.get("opp_id"))
+            proposals.pop(date_field, None)
+            continue
+        # Regression + no-change guard: compare to current value if known
+        current_v = str(opp.get(date_field) or "").strip()
+        if current_v:
+            try:
+                current_d = date.fromisoformat(current_v)
+                if parsed_d <= current_d:
+                    logger.info(
+                        "Dropping %s=%s (current=%s — would not advance) for opp %s",
+                        date_field, v, current_v, opp.get("opp_id"),
+                    )
+                    proposals.pop(date_field, None)
+            except (ValueError, TypeError):
+                pass
 
     return {
         "opp_id": opp.get("opp_id"),
@@ -316,7 +370,7 @@ def propose_updates_for_opp(opp: dict, account_name: str, row: dict,
             "expansion_notes": opp.get("expansion_notes") or "",
             "stage": opp.get("stage") or "",
             "close_date": str(opp.get("close_date") or ""),
-            "next_step_due_date": "",  # not in our row today
+            "next_step_due_date": str(opp.get("next_step_due_date") or ""),
         },
         "empty": not proposals,
     }
