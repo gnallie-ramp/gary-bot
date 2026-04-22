@@ -509,7 +509,14 @@ Return a JSON object with these exact keys:
       longer + recap-blocks.
 - "follow_up_email_cc": string — other emails to CC, comma-separated, or empty
 - "opps": list of objects, each with:
-    - "product": string (one of "Card Expansion", "Bill Pay Expansion", "Travel Expansion", "Treasury Expansion", "Procurement")
+    - "product": string — one of "Card Expansion", "Bill Pay Expansion",
+        "Travel Expansion", "Treasury Expansion", "Procurement", or "SaaS".
+        Use "SaaS" when the customer is on free/legacy Ramp and the call
+        discussed upgrading to Ramp Plus, OR when an existing Plus customer
+        discussed renewing / expanding Plus (AI agents, advanced policies,
+        SAML SSO, SCIM, custom fields, multi-entity controls, AI coding).
+        Create a SaaS opp whenever Plus / Ramp Plus was a primary discussion
+        topic on the call — not just when another product also came up.
     - "stage": string (always "S2: Sales Qualified Opportunity")
     - "monthly_amount": integer — the EXACT monthly dollar amount discussed on the call for this product. Use the customer's own words/numbers from the transcript, not estimates. For bill pay / AP, use the monthly AP volume they stated. For treasury, use the balance or deposit amount discussed. If no specific amount was stated but the product was discussed with mild interest or was a major talking point, use 15000 as the default amount.
     - "rationale": string (1 sentence — why this opp, citing transcript evidence)

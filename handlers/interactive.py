@@ -26,8 +26,10 @@ _WIN_REASON_PRODUCT = {
     "Bill Pay Expansion": "bill pay",
     "Treasury Expansion": "treasury/cash management",
     "Travel Expansion": "travel bookings",
-    "SaaS Expansion": "SaaS management",
+    "SaaS": "Ramp Plus (SaaS)",
+    "SaaS Expansion": "SaaS management",  # legacy alias — kept for backcompat
     "Procurement Expansion": "procurement",
+    "Procurement": "procurement",
 }
 
 
@@ -193,6 +195,11 @@ def register_interactive_handlers(app):
                         fields["RBA_Amount_Committed__c"] = amt_str
                     elif product == "Travel Expansion":
                         fields["Monthly_Travel_Bookings_Amount__c"] = amt_str
+                    else:
+                        # SaaS / Procurement / other — use generic expansion
+                        # amount, Growth MCP translator collapses to
+                        # expansion_product_amount on the create call.
+                        fields["Expansion_Amount__c"] = amt_str
 
                 # Card + Bill Pay defaults: Timeframe of Spend = Monthly,
                 # Primary Competitor = None, Win Reason = Single tech stack solution
@@ -377,6 +384,9 @@ def register_interactive_handlers(app):
                         fields["RBA_Amount_Committed__c"] = amt_str
                     elif product == "Travel Expansion":
                         fields["Monthly_Travel_Bookings_Amount__c"] = amt_str
+                    else:
+                        # SaaS / Procurement / other — generic amount field
+                        fields["Expansion_Amount__c"] = amt_str
 
                 # Primary_Contact__c auto-resolved by create_opportunity when not set
 
