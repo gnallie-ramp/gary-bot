@@ -1606,14 +1606,15 @@ def register_interactive_handlers(app):
     @app.action({"action_id": re.compile(r"^team_intel_peer_")})
     def handle_team_intel_peer_select(ack, body, client):
         """Swap the 'top deals' section to show a selected peer's deals.
-        Value = peer name (blank = deselect, return to own deals)."""
+        Value = peer name, or `__clear__` sentinel to deselect (Slack
+        rejects empty button values, so the Clear button needs a value)."""
         ack()
         user_id = body.get("user", {}).get("id", GREG_SLACK_ID)
         action = body.get("actions", [{}])[0]
-        peer_name = action.get("value") or ""
+        peer_name = (action.get("value") or "").strip()
 
         from handlers.home_tab import _team_intel_peer, _team_intel_expanded
-        if peer_name:
+        if peer_name and peer_name != "__clear__":
             _team_intel_peer[user_id] = peer_name
         else:
             _team_intel_peer.pop(user_id, None)

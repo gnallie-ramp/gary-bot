@@ -2226,13 +2226,15 @@ def _build_team_intel_tab(client, user_id):
                 f"{prefix} `#{rank:>2}` {name_fmt} — *${total:,}* CP  "
                 f"`Card ${card:,}` · `BP ${bp:,}` · {deals} deals"
             )}}
-        # Non-self rows get a button to drill into that rep's deals
+        # Non-self rows get a button to drill into that rep's deals.
+        # Slack rejects empty `value`, so the "clear" state uses a sentinel
+        # the handler converts back to "deselect".
         if not is_me:
             row_block["accessory"] = {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "View deals" if not is_selected else "× Clear"},
                 "action_id": f"team_intel_peer_{i}"[:150],
-                "value": "" if is_selected else owner,
+                "value": "__clear__" if is_selected else owner,
             }
         blocks.append(row_block)
 
@@ -2304,13 +2306,16 @@ def _build_team_intel_tab(client, user_id):
         block = {
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"{headline}\n_CW {cw_date}_"},
-            "accessory": {
+        }
+        # Only attach the Expand/Collapse accessory when we have an opp_id
+        # to round-trip. Slack rejects empty button values.
+        if opp_id:
+            block["accessory"] = {
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Collapse" if is_open else "Expand"},
                 "action_id": f"team_intel_deal_{opp_id}"[:150],
                 "value": opp_id,
-            },
-        }
+            }
         blocks.append(block)
 
         if is_open:
